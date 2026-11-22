@@ -1,39 +1,53 @@
 # OLauncherMod
 
-开发中
+面向 ColorOS Launcher 的 LSPosed（API 102）桌面网格与自由布局模块。
 
-- 目标应用：`com.android.launcher`（ColorOS 17.3.9）
-- minSdk 29 / targetSdk 36
+> 代码中的 ColorOS 内部方法依据 Launcher 17.5.5 的反编译版本检查，尚未经过设备实测；其他版本可能需要适配。
 
-## 工作方式
+## 功能
 
-| Hook | 作用 |
-| --- | --- |
-| `InvariantDeviceProfile.setColumnsAndRows` | DeviceProfile 使用配置的列行 |
-| `OplusCellLayout.setGridSize` | Workspace / CellLayout 实际网格同步 |
-| `Launcher.onCreate` | 启动时按当前网格重排 `launcher.db` 图标坐标 |
+- 配置桌面网格的列、行（横屏语义：4–8 列，3–8 行）。
+- 在 `OplusInvariantDeviceProfile.injectPreInitGridExt` 初始化之前同步 ColorOS 原生 `layout_cellcount_x/y` 设置，减少重启时恢复默认网格的情况。
+- 当变更属于无损扩展（数据库与 Hotseat 配置相同，已有桌面项全部在新范围内）时保留原坐标，不执行会改变排列的网格迁移。缩小网格等情况仍使用原生迁移。
+- 可选「保留空位」：拦截 `OplusCellLayout.fillUpEmptyCell` 的自动紧凑排列；不禁用通常的拖拽落点处理。
+- **不会在桌面启动时直接更新图标数据库，不调用自动 `reflow`，也不会强制修改所有 CellLayout 的网格尺寸。**
 
-配置位于 `/storage/emulated/0/Android/data/com.android.launcher/files/y700_grid`，一行 `列 行`，横屏语义；竖屏由 Launcher 转置。范围：列 4–8，行 3–8。模块每 2 秒最多读取一次，保存后重启桌面生效。
+## 配置
 
-重排只处理 `singledesktopitems` 中 `container=-100` 的条目，按 span 做首次适配，保留文件夹 span 与子项关系。同一网格只执行一次，记录在 SharedPreferences `y700_reflow`。
+模块设置界面保存到 Launcher 的应用文件目录：
 
-## 目录
-
-```
-src/local/y700/launcher/LauncherModule.java   网格 hook 与重排
-src/local/y700/launcher/MainActivity.java     网格设置界面
-res/                                          模块图标
-META-INF/xposed/                              模块元数据（API 102）
-AndroidManifest.xml
-reflow.py                                     离线重排脚本
+```text
+/storage/emulated/0/Android/data/com.android.launcher/files/launcher_grid
 ```
 
-## 离线重排
+格式为 `列 行 保留空位`，例如：
 
+```text
+8 4 1
 ```
-python3 reflow.py launcher.db 8 4
+
+最后一项：`1` 禁止自动紧凑排列（默认），`0` 保留原生排列。兼容仅有前两项的配置。修改后需重启桌面。
+
+配置范围不超过 8，因为所核对的 ColorOS 17.5.5 版本中 `DeviceGridState` 按单个字符解析行列数，无法正确处理两位数网格。
+
+## 项目结构
+
+```text
+src/com/yu4032/olaunchermod/LauncherModule.java  LSPosed Hook
+src/com/yu4032/olaunchermod/MainActivity.java    布局设置
+AndroidManifest.xml                              应用声明
+META-INF/xposed/                                 模块信息与作用域
+res/                                             图标
 ```
+
+目标包名：`com.android.launcher`。本项目模块应用标识：`com.yu4032.olaunchermod`。
+
+## 更新注意事项
+
+此版本调整了模块自身的 Android 包名与配置文件名，属于**新的模块安装标识**。旧版无法直接就地覆盖；需安装新模块、在 LSPosed 中勾选 `com.android.launcher` 作用域，并重新保存网格设置。
+
+升级前备份 Launcher 数据和布局。请优先验证 6×4 → 8×4、在新增列移动图标、重启桌面后的坐标、文件夹与小组件的正常行为。
 
 ## 构建
 
-依赖 `io.github.libxposed:api:102.0.0`，产物为模块 APK（`out/Y700Launcher102.apk`）。
+依赖 `io.github.libxposed:api:102.0.0`、Android SDK（minSdk 29 / targetSdk 36）。仓库当前只有模块源码与元数据，尚未包含可直接运行的 Gradle 构建脚本或 CI；本次变更未完成 APK 构建和真机验证。
