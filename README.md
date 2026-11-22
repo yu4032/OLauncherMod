@@ -10,7 +10,10 @@
 - 在 `OplusInvariantDeviceProfile.injectPreInitGridExt` 初始化之前同步 ColorOS 原生 `layout_cellcount_x/y` 设置，减少重启时恢复默认网格的情况。
 - 当变更属于无损扩展（数据库与 Hotseat 配置相同，已有桌面项全部在新范围内）时保留原坐标，不执行会改变排列的网格迁移。缩小网格等情况仍使用原生迁移。
 - 可选「保留空位」：拦截 `OplusCellLayout.fillUpEmptyCell` 的自动紧凑排列；不禁用通常的拖拽落点处理。
-- **不会在桌面启动时直接更新图标数据库，不调用自动 `reflow`，也不会强制修改所有 CellLayout 的网格尺寸。**
+- **不会在桌面启动时直接更新图标数据库，不调用自动 `reflow`。**
+- 在 `OplusCellLayout` 页面初始化后检查真实 `getCountX/getCountY`，并拦截工作区专属的两参数及三参数 `setGridSize` 与旋转用 `setGridCellSize`；仅对真正的工作区页面生效，不改文件夹或 Hotseat。
+- 与 ColorOS 的 `c6.b(Context)` 原生网格来源保持一致，避免旋转重新读取旧的 6 列配置。
+- 提供「刷新工作区实际网格」状态，核对运行中的网格尺寸，不再依赖设置界面显示的配置推断是否生效。
 
 ## 配置
 
@@ -29,6 +32,20 @@
 最后一项：`1` 禁止自动紧凑排列（默认），`0` 保留原生排列。兼容仅有前两项的配置。修改后需重启桌面。
 
 配置范围不超过 8，因为所核对的 ColorOS 17.5.5 版本中 `DeviceGridState` 按单个字符解析行列数，无法正确处理两位数网格。
+
+## 运行状态诊断
+
+设置界面点击 **刷新工作区实际网格**，模块从 Launcher 自身进程生成的 `launcher_grid_status` 读取：
+
+```text
+stage=page_created
+configured_landscape=8x4
+expected_workspace=8x4
+actual_workspace=8x4
+match=true
+```
+
+`expected_workspace` 是按照 ColorOS 平板方向转换计算的目标行列，`actual_workspace` 才是运行中的 `OplusCellLayout.getCountX()/getCountY()`。竖屏（使用 ColorOS 新平板布局）时，`8x4` 的横屏配置可转换为 `4x8`。如果报告缺失，先核对 LSPosed 作用域是否包含 `com.android.launcher`；如果 `match=false`，保存本次状态和 `OLauncherMod` 日志以定位后续覆盖点。
 
 ## 项目结构
 

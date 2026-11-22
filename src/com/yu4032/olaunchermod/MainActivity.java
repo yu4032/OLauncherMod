@@ -26,6 +26,7 @@ public final class MainActivity extends Activity {
     private EditText rowsInput;
     private CheckBox keepEmpty;
     private TextView status;
+    private TextView runtimeStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -40,14 +41,14 @@ public final class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("桌面网格");
+        title.setText("桌面工作区网格");
         title.setTextSize(20);
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("按横屏布局设置列数 4–8、行数 3–8。"
-                + "扩大网格时尽量保留现有图标位置；竖屏布局由桌面处理。"
-                + "保存后重启桌面生效。");
+        hint.setText("设置横屏网格：列数 4–8、行数 3–8。"
+                + "采用平板旋转布局时，竖屏会交换行列。"
+                + "修改后重启桌面，检查下方工作区实际网格。");
         hint.setTextSize(12);
         hint.setPadding(0, pad / 2, 0, pad);
         root.addView(hint);
@@ -71,8 +72,20 @@ public final class MainActivity extends Activity {
         status.setPadding(0, pad / 2, 0, 0);
         root.addView(status);
 
+        Button refresh = new Button(this);
+        refresh.setText("刷新工作区实际网格");
+        refresh.setOnClickListener(view -> loadRuntimeStatus());
+        root.addView(refresh);
+
+        runtimeStatus = new TextView(this);
+        runtimeStatus.setTextIsSelectable(true);
+        runtimeStatus.setTextSize(13);
+        runtimeStatus.setPadding(0, pad / 2, 0, pad / 2);
+        root.addView(runtimeStatus);
+
         setContentView(scroll);
         loadCurrent();
+        loadRuntimeStatus();
     }
 
     private EditText numberInput() {
@@ -148,6 +161,19 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void loadRuntimeStatus() {
+        String content = runRootRead("cat " + DIR
+                + "/launcher_grid_status 2>/dev/null");
+        if (content.isEmpty()) {
+            runtimeStatus.setText("尚未收到桌面工作区报告。请确认 LSPosed 已启用模块、"
+                    + "勾选 com.android.launcher，重启桌面后再刷新。");
+        } else {
+            runtimeStatus.setText("Launcher 实际网格：\n" + content
+                    + "\n注意：expected_workspace / actual_workspace "
+                    + "应相同。若不同请提供此状态和 LSPosed 日志。");
+        }
+    }
+
     private void applyGrid() {
         int columns;
         int rows;
@@ -168,9 +194,12 @@ public final class MainActivity extends Activity {
         boolean saved = runRootCommand("mkdir -p " + DIR
                 + " && printf '%s\\n' '" + config + "' > " + GRID
                 + " && chmod 644 " + GRID
+                + " && rm -f " + DIR + "/launcher_grid_status"
                 + " && am force-stop com.android.launcher");
         if (saved) {
-            status.setText("已保存 " + columns + " 列 × " + rows + " 行，已请求桌面重启");
+            status.setText("已保存横屏网格 " + columns + " 列 × " + rows
+                    + " 行。待桌面恢复后点击刷新实际网格。");
+            runtimeStatus.setText("正在重启桌面，旧状态报告已清除。");
             Toast.makeText(this, "已保存布局", Toast.LENGTH_SHORT).show();
         } else {
             status.setText("保存失败，请确认 root 授权");

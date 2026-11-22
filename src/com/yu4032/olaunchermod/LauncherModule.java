@@ -145,6 +145,89 @@ public final class LauncherModule extends XposedModule {
         return true;
     }
 
+
+    // On ColorOS tablets the native orientation helper swaps the persisted
+    // landscape grid while in portrait. Match that exact rule at every layer.
+    private int[] effectiveWorkspaceGrid(ClassLoader loader) {
+        int x = requestedColumns;
+        int y = requestedRows;
+        if (x <= 0 || y <= 0) return new int[]{0, 0};
+        try {
+            Class<?> rotation = Class.forName("p5.c", false, loader);
+            Method portrait = rotation.getDeclaredMethod("d");
+            portrait.setAccessible(true);
+            if (x > y && Boolean.TRUE.equals(portrait.invoke(null))) {
+                return new int[]{y, x};
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "rotation helper unavailable; using stored grid: " + error);
+        }
+        return new int[]{x, y};
+    }
+
+    private boolean isWorkspaceCell(Object instance) {
+        // Exact class deliberately excludes Hotseat and Folder CellLayouts.
+        if (instance == null || !instance.getClass().getName().equals(
+                "com.android.launcher3.OplusCellLayout")) return false;
+        try {
+            return Boolean.TRUE.equals(instance.getClass().getMethod(
+                    "isBelongToContainerType", int.class).invoke(instance, 0));
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "workspace type check failed: " + error);
+            return false;
+        }
+    }
+
+    private int[] actualGrid(Object cell) throws Exception {
+        return new int[]{
+                integer(cell, "getCountX"),
+                integer(cell, "getCountY")
+        };
+    }
+
+    /**
+     * This is read by the settings Activity using its existing root reader.
+     * It records the real CellLayout grid, not merely the configured dimensions.
+     */
+    private synchronized void recordGridState(Context context, String stage,
+            ClassLoader loader, int actualX, int actualY) {
+        try {
+            File dir = context.getExternalFilesDir(null);
+            if (dir == null) return;
+            int[] effective = effectiveWorkspaceGrid(loader);
+            String value = "stage=" + stage + "\n"
+                    + "configured_landscape=" + requestedColumns + "x" + requestedRows + "\n"
+                    + "expected_workspace=" + effective[0] + "x" + effective[1] + "\n"
+                    + "actual_workspace=" + actualX + "x" + actualY + "\n"
+                    + "match=" + (actualX == effective[0] && actualY == effective[1]) + "\n";
+            try (java.io.FileOutputStream output = new java.io.FileOutputStream(
+                    new File(dir, "launcher_grid_status"))) {
+                output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            log(Log.INFO, TAG, "grid state: " + value.replace('\n', ' '));
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "unable to record actual grid: " + error);
+        }
+    }
+
+    private void ensureWorkspaceGrid(Object cell, Context context,
+            ClassLoader loader, String stage) {
+        if (!isWorkspaceCell(cell) || requestedColumns <= 0 || requestedRows <= 0) return;
+        try {
+            int[] expected = effectiveWorkspaceGrid(loader);
+            int[] before = actualGrid(cell);
+            if (before[0] != expected[0] || before[1] != expected[1]) {
+                Method set = cell.getClass().getMethod(
+                        "setGridSize", int.class, int.class);
+                set.invoke(cell, expected[0], expected[1]);
+            }
+            int[] after = actualGrid(cell);
+            recordGridState(context, stage, loader, after[0], after[1]);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace grid validation failed: " + error);
+        }
+    }
+
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (!"com.android.launcher".equals(param.getPackageName())) return;
@@ -176,18 +259,158 @@ public final class LauncherModule extends XposedModule {
                     "injectPreInitGridExt", Context.class, option);
             hook(init).intercept(chain -> {
                 refresh();
+                Context context = (Context) chain.getArgs().get(0);
                 if (requestedColumns > 0 && requestedRows > 0) {
                     try {
-                        synchronizeOplusGrid((Context) chain.getArgs().get(0), loader);
+                        synchronizeOplusGrid(context, loader);
                     } catch (Throwable error) {
                         log(Log.ERROR, TAG, "persistent grid sync failed: " + error);
                     }
                 }
-                return chain.proceed();
+                Object result = chain.proceed();
+                // The original Oplus override may re-read native mode settings.
+                // Validate the final IDP instead of assuming setColumnsAndRows won.
+                if (requestedColumns > 0 && requestedRows > 0) {
+                    try {
+                        Object profile = chain.getThisObject();
+                        int[] target = effectiveWorkspaceGrid(loader);
+                        int x = integer(profile, "getNumColumns");
+                        int y = integer(profile, "getNumRows");
+                        if (x != target[0] || y != target[1]) {
+                            Method set = profile.getClass().getMethod(
+                                    "setColumnsAndRows", int.class, int.class);
+                            set.invoke(profile, requestedColumns, requestedRows);
+                            x = integer(profile, "getNumColumns");
+                            y = integer(profile, "getNumRows");
+                        }
+                        if (x != target[0] || y != target[1]) {
+                            log(Log.ERROR, TAG, "IDP axes mismatch after init: "
+                                    + x + "x" + y + " expected " + target[0] + "x" + target[1]);
+                        }
+                        Class<?> config = Class.forName("com.android.launcher.c6", false, loader);
+                        java.lang.reflect.Field xField = config.getDeclaredField("f1273g");
+                        java.lang.reflect.Field yField = config.getDeclaredField("h");
+                        xField.setAccessible(true);
+                        yField.setAccessible(true);
+                        xField.setInt(null, x);
+                        yField.setInt(null, y);
+                        log(Log.INFO, TAG, "IDP final grid " + x + "x" + y
+                                + ", configured " + requestedColumns + "x" + requestedRows);
+                    } catch (Throwable error) {
+                        log(Log.ERROR, TAG, "IDP final grid check failed: " + error);
+                    }
+                }
+                return result;
             });
             log(Log.INFO, TAG, "persistent grid hook installed");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "persistent grid hook failed: " + error);
+        }
+
+
+        // c6.b(Context) is the normal-mode source of native grid dimensions.
+        // Its result also feeds RotationLayoutUtils, so keeping it in sync
+        // prevents a later orientation pass from restoring the stock 6-column grid.
+        try {
+            Class<?> gridConfig = Class.forName("com.android.launcher.c6", false, loader);
+            Method read = gridConfig.getDeclaredMethod("b", Context.class);
+            hook(read).intercept(chain -> {
+                Object result = chain.proceed();
+                refresh();
+                if (requestedColumns <= 0 || requestedRows <= 0) return result;
+                return new int[]{requestedColumns, requestedRows};
+            });
+            log(Log.INFO, TAG, "native grid source hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "native grid source hook failed: " + error);
+        }
+
+        // Workspace pages are initialized from the IDP inside CellLayout's
+        // constructor. Correct the actual grid after OplusCellLayout is ready,
+        // before workspace items are bound to the page.
+        try {
+            Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
+            for (java.lang.reflect.Constructor<?> constructor : page.getDeclaredConstructors()) {
+                hook(constructor).intercept(chain -> {
+                    Object result = chain.proceed();
+                    refresh();
+                    if (chain.getArgs().size() > 0 && chain.getArgs().get(0) instanceof Context) {
+                        ensureWorkspaceGrid(chain.getThisObject(),
+                                (Context) chain.getArgs().get(0), loader, "page_created");
+                    }
+                    return result;
+                });
+            }
+            log(Log.INFO, TAG, "workspace constructor hooks installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace constructor hooks failed: " + error);
+        }
+
+        // This 2-argument override recalculates Oplus cell widths. Scope it to
+        // genuine workspace pages, never folder or Hotseat grids.
+        try {
+            Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
+            Method set = page.getDeclaredMethod("setGridSize", int.class, int.class);
+            hook(set).intercept(chain -> {
+                refresh();
+                Object cell = chain.getThisObject();
+                if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
+                int[] effective = effectiveWorkspaceGrid(loader);
+                Object result = chain.proceed(new Object[]{effective[0], effective[1]});
+                int[] actual = actualGrid(cell);
+                recordGridState(((android.view.View) cell).getContext(),
+                        "setGridSize_2", loader, actual[0], actual[1]);
+                return result;
+            });
+            log(Log.INFO, TAG, "workspace 2-arg grid hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace 2-arg grid hook failed: " + error);
+        }
+
+        // Native LayoutSettingsHelper and rotation code also call the inherited
+        // 3-argument method, bypassing the 2-argument override.
+        try {
+            Class<?> base = Class.forName("com.android.launcher3.CellLayout", false, loader);
+            Method set = base.getDeclaredMethod("setGridSize",
+                    int.class, int.class, boolean.class);
+            hook(set).intercept(chain -> {
+                refresh();
+                Object cell = chain.getThisObject();
+                if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
+                int[] effective = effectiveWorkspaceGrid(loader);
+                boolean relayout = (Boolean) chain.getArgs().get(2);
+                Object result = chain.proceed(new Object[]{
+                        effective[0], effective[1], relayout});
+                int[] actual = actualGrid(cell);
+                recordGridState(((android.view.View) cell).getContext(),
+                        "setGridSize_3", loader, actual[0], actual[1]);
+                return result;
+            });
+            log(Log.INFO, TAG, "workspace 3-arg grid hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace 3-arg grid hook failed: " + error);
+        }
+
+        // Rotation's setGridCellSize updates cell dimensions before calling
+        // the base 3-arg grid setter. Rewrite both axes at this earlier entry.
+        try {
+            Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
+            Method set = page.getDeclaredMethod("setGridCellSize",
+                    int.class, int.class, int.class, int.class);
+            hook(set).intercept(chain -> {
+                refresh();
+                if (!isWorkspaceCell(chain.getThisObject()) || requestedColumns <= 0) {
+                    return chain.proceed();
+                }
+                int[] effective = effectiveWorkspaceGrid(loader);
+                Object[] args = chain.getArgs().toArray();
+                args[0] = effective[0];
+                args[1] = effective[1];
+                return chain.proceed(args);
+            });
+            log(Log.INFO, TAG, "workspace rotation grid hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace rotation grid hook failed: " + error);
         }
 
         // This override performs ColorOS workspace compact/reflow, distinct from
