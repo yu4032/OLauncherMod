@@ -49,6 +49,16 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
 
+## Compose 设置界面与竖屏自适应高度（17.5.5）
+
+- **UI 完整迁移**：网格主页与工作区位置页改为 Kotlin Jetpack Compose（Material3、ColorOS 风格圆角分组、横竖屏独立滑块、精确数值输入、微调、重置与状态诊断）；不再保留旧 Java Activity 的输入框布局。
+- **Android 兼容**：继续使用 AGP 8.11.1 / compileSdk 36，Kotlin 2.2.20、Compose BOM 2025.09.00；暂不引入需要更新 Kotlin/Compose 运行时的第三方 COUI 1.1.0。视觉参考 COUI，但不是 OEM 私有 COUI 控件。
+- **竖屏动态高度**：17.5.5 的 `PagedView.onMeasure` 只扣除 Insets，没有扣除 Workspace 自身上下 Padding。现在对真实 Workspace 页面的纵向 MeasureSpec 扣除当前已应用的顶部和底部 Padding，再由原生 `CellLayout.onMeasure` 按 4×8 的 8 行重算单元格高度，超过剩余空间的旧固定单元格尺寸会被释放。横屏 8×4、Hotseat 和文件夹不受此钩子影响。
+- **诊断**：新增 `launcher_viewport_status`（可用高度、保留上下区域、行数和实际单元格高度）；不写入图标数据库，不重排 ItemInfo。
+- 原来的 `launcher_grid` 和 `launcher_workspace_margins` 均保持同一存储格式及兼容性。
+
+源码与 DEX 理据：[docs/WORKSPACE_VIEWPORT_1755.md](docs/WORKSPACE_VIEWPORT_1755.md)。需要真实竖屏测试确认第 1–8 行都在可用区域内。
+
 ## 工作区位置与边距（参考 LiquidDock 设置交互）
 
 参考 [LiquidDock 源码](https://github.com/yu4032/LiquidDock/blob/main/src/main/kotlin/com/hellovoid/liquiddock/DeclaredSettingsPages.kt)：布局页区分**横屏 / 竖屏**，每个方向独立的三个参数分别是**水平距离偏移、顶部距离偏移、底部距离偏移**。水平偏移同时叠加左右两侧的留白，不再要求逐个填写左/右的文本框。设置操作采用 LiquidDock `IntSetting` 的交互结构：**滑块 + 可点的 dp 数值 + 数值输入对话框 + ±1 dp 微调 + 单项重置**，并提供当前方向和全部重置。

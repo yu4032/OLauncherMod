@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Rect;
+import android.graphics.Point;
+import android.view.ViewGroup;
 import android.util.Log;
 import android.view.View;
 
@@ -35,6 +37,7 @@ public final class LauncherModule extends XposedModule {
     private volatile boolean keepEmptySlots = true;
     private volatile WorkspaceMarginConfig workspaceMargins = WorkspaceMarginConfig.DEFAULT;
     private volatile String lastMarginReport = "";
+    private volatile String lastViewportReport = "";
     // A layout change requires a fresh Launcher process, never a mid-drag
     // configuration swap between live views, loader and database.
     private boolean configInitialized;
@@ -332,6 +335,32 @@ public final class LauncherModule extends XposedModule {
             log(Log.WARN, TAG, "loader status persistence unavailable: " + error);
         }
         log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
+    }
+
+    private synchronized void recordViewportState(Context context,
+            int incomingHeight, int availableHeight, int rows,
+            int topPadding, int bottomPadding, int actualCellHeight) {
+        String value = "orientation=portrait\n"
+                + "paged_child_height_px=" + incomingHeight + "\n"
+                + "workspace_padding_top_px=" + topPadding + "\n"
+                + "workspace_padding_bottom_px=" + bottomPadding + "\n"
+                + "remaining_grid_height_px=" + availableHeight + "\n"
+                + "rows=" + rows + "\n"
+                + "actual_cell_height_px=" + actualCellHeight + "\n";
+        if (value.equals(lastViewportReport)) return;
+        lastViewportReport = value;
+        try {
+            File dir = context.getExternalFilesDir(null);
+            if (dir != null) {
+                try (java.io.FileOutputStream stream = new java.io.FileOutputStream(
+                        new File(dir, "launcher_viewport_status"))) {
+                    stream.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "workspace viewport report failed: " + error);
+        }
+        log(Log.INFO, TAG, "workspace viewport: " + value.replace('\n', ' '));
     }
 
     private synchronized void recordMarginState(Context context,
@@ -904,6 +933,81 @@ public final class LauncherModule extends XposedModule {
                     + " (17.5.5 Workspace.setInsets)");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "workspace padding customization hook failed: " + error);
+        }
+
+        // ColorOS 17.5.5 PagedView.onMeasure subtracts the OS mInsets
+        // but *not* Workspace's top/bottom padding from child MeasureSpecs.
+        // With portrait 4x8, native pages can still be measured as if the
+        // icon grid occupied the full screen, overflowing the reserved
+        // status/search area and Hotseat. Fit the PAGE before native measures
+        // cells, not by scaling already-laid-out icons or modifying DB rows.
+        try {
+            Class<?> page = Class.forName(
+                    "com.android.launcher3.OplusCellLayout", false, loader);
+            Class<?> base = Class.forName(
+                    "com.android.launcher3.CellLayout", false, loader);
+            Method onMeasure = HookSymbols.method(page, "onMeasure",
+                    void.class, false, false, int.class, int.class);
+            Method getWorkspace = HookSymbols.method(base, "getWorkspace",
+                    Class.forName("com.android.launcher3.Workspace", false, loader),
+                    false, false);
+            java.lang.reflect.Field borderField = HookSymbols.field(
+                    base, "mBorderSpace", Point.class, false, false);
+            java.lang.reflect.Field fixedHeight = HookSymbols.field(
+                    base, "mFixedCellHeight", int.class, false, false);
+            java.lang.reflect.Field fixedWidth = HookSymbols.field(
+                    base, "mFixedCellWidth", int.class, false, false);
+            hook(onMeasure).intercept(chain -> {
+                Object cell = chain.getThisObject();
+                if (!isWorkspaceCell(cell) || requestedColumns == 0) {
+                    return chain.proceed();
+                }
+                try {
+                    ViewGroup workspace = (ViewGroup) getWorkspace.invoke(cell);
+                    if (workspace == null) return chain.proceed();
+                    int rows = integer(cell, "getCountY");
+                    if (rows < 6) return chain.proceed();
+                    int[] axes = effectiveWorkspaceGrid(workspace.getContext(), 0, 0);
+                    if (axes[0] >= axes[1]) return chain.proceed();
+                    int widthSpec = (Integer) chain.getArgs().get(0);
+                    int heightSpec = (Integer) chain.getArgs().get(1);
+                    if (View.MeasureSpec.getMode(heightSpec) != View.MeasureSpec.EXACTLY) {
+                        return chain.proceed();
+                    }
+                    Point borders = (Point) borderField.get(cell);
+                    int borderY = borders == null ? 0 : borders.y;
+                    int originalHeight = View.MeasureSpec.getSize(heightSpec);
+                    WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
+                            originalHeight, workspace.getPaddingTop(),
+                            workspace.getPaddingBottom(), rows, borderY, true);
+                    int storedFixedHeight = fixedHeight.getInt(cell);
+                    if (WorkspaceViewportPolicy.fixedCellOverflows(
+                            storedFixedHeight, fit.maxCellHeight)) {
+                        // Native CellLayout.onMeasure skips recalculation when
+                        // both fixed-cell dimensions are nonzero. Release its
+                        // outdated fixed dimensions only for an oversized grid.
+                        fixedHeight.setInt(cell, 0);
+                        fixedWidth.setInt(cell, 0);
+                    }
+                    Object result = fit.reduced
+                            ? chain.proceed(new Object[]{widthSpec,
+                                    View.MeasureSpec.makeMeasureSpec(
+                                            fit.childHeight, View.MeasureSpec.EXACTLY)})
+                            : chain.proceed();
+                    if (fit.reduced) {
+                        recordViewportState(workspace.getContext(), originalHeight,
+                                fit.childHeight, rows, workspace.getPaddingTop(),
+                                workspace.getPaddingBottom(), integer(cell, "getCellHeight"));
+                    }
+                    return result;
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "workspace viewport fit failed: " + error);
+                    return chain.proceed();
+                }
+            });
+            log(Log.INFO, TAG, "17.5.5 workspace portrait viewport-fit installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace viewport-fit hook unavailable: " + error);
         }
 
         // Workspace pages are initialized from the IDP inside CellLayout's
