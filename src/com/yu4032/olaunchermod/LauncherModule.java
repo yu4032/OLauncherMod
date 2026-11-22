@@ -74,9 +74,8 @@ public final class LauncherModule extends XposedModule {
 
         Class<?> helper = Class.forName(
                 "com.android.launcher.togglebar.LayoutSettingsHelper", false, loader);
-        Method save = helper.getDeclaredMethod(
-                "saveLayoutInfo", Context.class, int.class, int.class);
-        save.setAccessible(true);
+        Method save = HookSymbols.method(helper, "saveLayoutInfo",
+                void.class, true, false, Context.class, int.class, int.class);
         save.invoke(null, context, requestedColumns, requestedRows);
         log(Log.INFO, TAG, "persistent grid synchronized to "
                 + requestedColumns + "x" + requestedRows);
@@ -165,8 +164,8 @@ public final class LauncherModule extends XposedModule {
         if (x <= 0 || y <= 0) return new int[]{0, 0};
         try {
             Class<?> rotation = Class.forName("p5.c", false, loader);
-            Method portrait = rotation.getDeclaredMethod("d");
-            portrait.setAccessible(true);
+            Method portrait = HookSymbols.method(rotation, "d", boolean.class,
+                    true, true);
             if (x > y && Boolean.TRUE.equals(portrait.invoke(null))) {
                 return new int[]{y, x};
             }
@@ -261,8 +260,8 @@ public final class LauncherModule extends XposedModule {
             int[] expected = effectiveWorkspaceGrid(loader);
             int[] before = actualGrid(cell);
             if (before[0] != expected[0] || before[1] != expected[1]) {
-                Method set = cell.getClass().getMethod(
-                        "setGridSize", int.class, int.class);
+                Method set = HookSymbols.method(cell.getClass(), "setGridSize",
+                        void.class, false, false, int.class, int.class);
                 set.invoke(cell, expected[0], expected[1]);
             }
             int[] after = actualGrid(cell);
@@ -272,16 +271,76 @@ public final class LauncherModule extends XposedModule {
         }
     }
 
+    /**
+     * Do not partially alter the launcher's grid if the critical version-
+     * dependent symbols cannot all be resolved. Data-loading mismatch is
+     * worse than an unchanged default grid.
+     */
+    private boolean preflightGridSymbols(ClassLoader loader) {
+        try {
+            Class<?> pair = Class.forName("kotlin.Pair", false, loader);
+            Class<?> idp = Class.forName(
+                    "com.android.launcher3.InvariantDeviceProfile", false, loader);
+            HookSymbols.method(idp, "setColumnsAndRows", void.class, false,
+                    false, int.class, int.class);
+            Class<?> cell = Class.forName(
+                    "com.android.launcher3.OplusCellLayout", false, loader);
+            HookSymbols.method(cell, "setGridSize", void.class, false,
+                    false, int.class, int.class);
+            Class<?> baseCell = Class.forName(
+                    "com.android.launcher3.CellLayout", false, loader);
+            HookSymbols.method(baseCell, "setGridSize", void.class, false,
+                    false, int.class, int.class, boolean.class);
+            Class<?> cursor = Class.forName(
+                    "com.android.launcher3.model.OplusLoaderCursor", false, loader);
+            Class<?> item = Class.forName(
+                    "com.android.launcher3.model.data.ItemInfo", false, loader);
+            Class<?> screens = Class.forName(
+                    "com.android.launcher3.util.IntArray", false, loader);
+            HookSymbols.method(cursor, "checkItemPlacement", boolean.class,
+                    false, false, item, screens);
+            Class<?> helper = Class.forName("j5.i", false, loader);
+            Method boundary = HookSymbols.method(helper, "I", pair,
+                    false, true, pair);
+            Class<?> grid = Class.forName("com.android.launcher.c6", false, loader);
+            HookSymbols.method(grid, "b", int[].class, true, false, Context.class);
+            Class<?> rotation = Class.forName("p5.c", false, loader);
+            Method orientation = HookSymbols.method(rotation, "a", pair,
+                    true, true, int.class);
+            HookSymbols.field(rotation, "a", pair, true, true);
+            if (keepEmptySlots) {
+                Class<?> arrangement = Class.forName(
+                        "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+                HookSymbols.method(arrangement, "b", void.class, true,
+                        true, Context.class);
+                HookSymbols.method(arrangement, "c", boolean.class, true, true);
+                HookSymbols.method(arrangement, "e", void.class, true,
+                        true, boolean.class);
+            }
+            log(Log.INFO, TAG, "verified grid symbols: final-boundary="
+                    + boundary.getDeclaringClass().getName() + "#" + boundary.getName()
+                    + ", orientation=" + orientation.getDeclaringClass().getName()
+                    + "#" + orientation.getName());
+            return true;
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "unsupported Launcher symbol layout; "
+                    + "skipping ALL grid hooks to protect desktop data: " + error);
+            return false;
+        }
+    }
+
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (!"com.android.launcher".equals(param.getPackageName())) return;
         ClassLoader loader = param.getDefaultClassLoader();
         refresh();
+        if (requestedColumns > 0 && !preflightGridSymbols(loader)) return;
 
         try {
             Class<?> idp = Class.forName(
                     "com.android.launcher3.InvariantDeviceProfile", false, loader);
-            Method method = idp.getDeclaredMethod("setColumnsAndRows", int.class, int.class);
+            Method method = HookSymbols.method(idp, "setColumnsAndRows",
+                    void.class, false, false, int.class, int.class);
             hook(method).intercept(chain -> {
                 refresh();
                 if (requestedColumns > 0 && requestedRows > 0) {
@@ -299,8 +358,8 @@ public final class LauncherModule extends XposedModule {
                     "com.android.launcher3.OplusInvariantDeviceProfile", false, loader);
             Class<?> option = Class.forName(
                     "com.android.launcher3.InvariantDeviceProfile$GridOption", false, loader);
-            Method init = ext.getDeclaredMethod(
-                    "injectPreInitGridExt", Context.class, option);
+            Method init = HookSymbols.method(ext, "injectPreInitGridExt",
+                    void.class, false, false, Context.class, option);
             hook(init).intercept(chain -> {
                 refresh();
                 Context context = (Context) chain.getArgs().get(0);
@@ -321,8 +380,9 @@ public final class LauncherModule extends XposedModule {
                         int x = integer(profile, "getNumColumns");
                         int y = integer(profile, "getNumRows");
                         if (x != target[0] || y != target[1]) {
-                            Method set = profile.getClass().getMethod(
-                                    "setColumnsAndRows", int.class, int.class);
+                            Method set = HookSymbols.method(profile.getClass(),
+                                    "setColumnsAndRows", void.class, false, false,
+                                    int.class, int.class);
                             set.invoke(profile, requestedColumns, requestedRows);
                             x = integer(profile, "getNumColumns");
                             y = integer(profile, "getNumRows");
@@ -332,10 +392,10 @@ public final class LauncherModule extends XposedModule {
                                     + x + "x" + y + " expected " + target[0] + "x" + target[1]);
                         }
                         Class<?> config = Class.forName("com.android.launcher.c6", false, loader);
-                        java.lang.reflect.Field xField = config.getDeclaredField("f1273g");
-                        java.lang.reflect.Field yField = config.getDeclaredField("h");
-                        xField.setAccessible(true);
-                        yField.setAccessible(true);
+                        java.lang.reflect.Field xField = HookSymbols.field(
+                                config, "f1273g", int.class, true, false);
+                        java.lang.reflect.Field yField = HookSymbols.field(
+                                config, "h", int.class, true, false);
                         xField.setInt(null, x);
                         yField.setInt(null, y);
                         log(Log.INFO, TAG, "IDP final grid " + x + "x" + y
@@ -364,9 +424,11 @@ public final class LauncherModule extends XposedModule {
             Class<?> pair = Class.forName("kotlin.Pair", false, loader);
             java.lang.reflect.Constructor<?> pairCtor = pair.getConstructor(
                     Object.class, Object.class);
-            java.lang.reflect.Field landscapeCache = rotation.getDeclaredField("a");
-            landscapeCache.setAccessible(true);
-            Method dimensions = rotation.getDeclaredMethod("a", int.class);
+            java.lang.reflect.Field landscapeCache = HookSymbols.field(
+                    rotation, "a", pair, true, true);
+            Method dimensions = HookSymbols.method(rotation, "a", pair,
+                    true, true, int.class);
+            log(Log.INFO, TAG, "resolved rotation symbol: " + dimensions);
             hook(dimensions).intercept(chain -> {
                 refresh();
                 if (requestedColumns == 0 || requestedRows == 0) {
@@ -405,7 +467,8 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> cursorClass = Class.forName(
                     "com.android.launcher3.model.OplusLoaderCursor", false, loader);
-            Method mark = cursorClass.getDeclaredMethod("markDeleted", String.class);
+            Method mark = HookSymbols.method(cursorClass, "markDeleted",
+                    void.class, false, false, String.class);
             hook(mark).intercept(chain -> {
                 refresh();
                 String reason = (String) chain.getArgs().get(0);
@@ -451,8 +514,8 @@ public final class LauncherModule extends XposedModule {
                     "com.android.launcher3.model.data.ItemInfo", false, loader);
             Class<?> screens = Class.forName(
                     "com.android.launcher3.util.IntArray", false, loader);
-            Method placement = cursor.getDeclaredMethod(
-                    "checkItemPlacement", itemClass, screens);
+            Method placement = HookSymbols.method(cursor, "checkItemPlacement",
+                    boolean.class, false, false, itemClass, screens);
             hook(placement).intercept(chain -> {
                 Object result = chain.proceed();
                 if (Boolean.FALSE.equals(result) && requestedColumns > 0) {
@@ -485,8 +548,8 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> legacy = Class.forName(
                     "com.android.launcher3.model.OplusUnionGridCompatHelper", false, loader);
-            Method compat = legacy.getDeclaredMethod(
-                    "updateGridIfNeeded", Context.class, int[].class);
+            Method compat = HookSymbols.method(legacy, "updateGridIfNeeded",
+                    void.class, true, false, Context.class, int[].class);
             hook(compat).intercept(chain -> {
                 refresh();
                 if (requestedColumns > 0 && requestedRows > 0) return null;
@@ -502,7 +565,10 @@ public final class LauncherModule extends XposedModule {
         // prevents a later orientation pass from restoring the stock 6-column grid.
         try {
             Class<?> gridConfig = Class.forName("com.android.launcher.c6", false, loader);
-            Method read = gridConfig.getDeclaredMethod("b", Context.class);
+            // b(Context) and c(Context) both return int[]. A signature-only
+            // fallback is ambiguous, so this entry must retain a known name.
+            Method read = HookSymbols.method(gridConfig, "b", int[].class,
+                    true, false, Context.class);
             hook(read).intercept(chain -> {
                 Object result = chain.proceed();
                 refresh();
@@ -519,8 +585,10 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> arrangement = Class.forName(
                     "com.android.launcher.layout.LayoutUtilsManager", false, loader);
-            Method initMode = arrangement.getDeclaredMethod("b", Context.class);
-            Method setMode = arrangement.getDeclaredMethod("e", boolean.class);
+            Method initMode = HookSymbols.method(arrangement, "b",
+                    void.class, true, true, Context.class);
+            Method setMode = HookSymbols.method(arrangement, "e",
+                    void.class, true, true, boolean.class);
             hook(initMode).intercept(chain -> {
                 Object result = chain.proceed();
                 refresh();
@@ -549,7 +617,8 @@ public final class LauncherModule extends XposedModule {
                 }
                 return result;
             });
-            Method isCompact = arrangement.getDeclaredMethod("c");
+            Method isCompact = HookSymbols.method(arrangement, "c",
+                    boolean.class, true, true);
             hook(isCompact).intercept(chain -> {
                 refresh();
                 return requestedColumns > 0 && keepEmptySlots
@@ -574,7 +643,9 @@ public final class LauncherModule extends XposedModule {
             Class<?> pairClass = Class.forName("kotlin.Pair", false, loader);
             Constructor<?> pairConstructor = pairClass.getConstructor(
                     Object.class, Object.class);
-            Method effective = helperClass.getDeclaredMethod("I", pairClass);
+            Method effective = HookSymbols.method(helperClass, "I",
+                    pairClass, false, true, pairClass);
+            log(Log.INFO, TAG, "resolved model loader boundary symbol: " + effective);
             hook(effective).intercept(chain -> {
                 Object nativeResult = chain.proceed();
                 if (requestedColumns <= 0 || requestedRows <= 0) {
@@ -605,6 +676,10 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
             for (java.lang.reflect.Constructor<?> constructor : page.getDeclaredConstructors()) {
+                Class<?>[] parameters = constructor.getParameterTypes();
+                if (parameters.length == 0
+                        || !Context.class.isAssignableFrom(parameters[0])
+                        || constructor.isSynthetic()) continue;
                 hook(constructor).intercept(chain -> {
                     Object result = chain.proceed();
                     refresh();
@@ -624,7 +699,8 @@ public final class LauncherModule extends XposedModule {
         // genuine workspace pages, never folder or Hotseat grids.
         try {
             Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
-            Method set = page.getDeclaredMethod("setGridSize", int.class, int.class);
+            Method set = HookSymbols.method(page, "setGridSize",
+                    void.class, false, false, int.class, int.class);
             hook(set).intercept(chain -> {
                 refresh();
                 Object cell = chain.getThisObject();
@@ -649,7 +725,8 @@ public final class LauncherModule extends XposedModule {
         // 3-argument method, bypassing the 2-argument override.
         try {
             Class<?> base = Class.forName("com.android.launcher3.CellLayout", false, loader);
-            Method set = base.getDeclaredMethod("setGridSize",
+            Method set = HookSymbols.method(base, "setGridSize",
+                    void.class, false, false,
                     int.class, int.class, boolean.class);
             hook(set).intercept(chain -> {
                 refresh();
@@ -677,7 +754,8 @@ public final class LauncherModule extends XposedModule {
         // the base 3-arg grid setter. Rewrite both axes at this earlier entry.
         try {
             Class<?> page = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
-            Method set = page.getDeclaredMethod("setGridCellSize",
+            Method set = HookSymbols.method(page, "setGridCellSize",
+                    void.class, false, false,
                     int.class, int.class, int.class, int.class);
             hook(set).intercept(chain -> {
                 refresh();
@@ -699,8 +777,9 @@ public final class LauncherModule extends XposedModule {
         // ordinary drag-and-drop relocation. Never override generic setGridSize.
         try {
             Class<?> cell = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
-            Method compact = cell.getDeclaredMethod(
-                    "fillUpEmptyCell", int[].class, int[].class, boolean.class, boolean.class);
+            Method compact = HookSymbols.method(cell, "fillUpEmptyCell",
+                    void.class, false, false,
+                    int[].class, int[].class, boolean.class, boolean.class);
             hook(compact).intercept(chain -> {
                 refresh();
                 if (requestedColumns > 0 && requestedRows > 0 && keepEmptySlots
@@ -720,9 +799,9 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> settings = Class.forName(
                     "com.android.launcher3.LauncherSettings$Settings", false, loader);
-            Method call = settings.getDeclaredMethod(
-                    "call", android.content.ContentResolver.class,
-                    String.class, String.class);
+            Method call = HookSymbols.method(settings, "call",
+                    android.os.Bundle.class, true, false,
+                    android.content.ContentResolver.class, String.class, String.class);
             hook(call).intercept(chain -> {
                 if ("create_empty_db".equals(chain.getArgs().get(1))
                         && Boolean.TRUE.equals(migrationResetPending.get())
@@ -742,8 +821,8 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> migration = Class.forName(
                     "com.android.launcher3.model.GridSizeMigrationTaskV2", false, loader);
-            Method migrate = migration.getDeclaredMethod(
-                    "migrateGridIfNeeded", Context.class);
+            Method migrate = HookSymbols.method(migration, "migrateGridIfNeeded",
+                    boolean.class, true, false, Context.class);
             hook(migrate).intercept(chain -> {
                 refresh();
                 migrationResetPending.remove();

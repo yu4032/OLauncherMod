@@ -41,6 +41,14 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 **注意：此修复阻止后续重启继续发生相同的数据删除，但不会自动恢复之前已从桌面数据库删除的图标记录。** 已删除的快捷方式应从桌面备份恢复，或者重新添加到工作区。更改前请先备份桌面布局。
 
+## 跨版本符号解析
+
+代码已统一采用 **Java/ART 方法名 + 完整函数签名** 解析，不依赖 native 地址、固定字段偏移或 dex 方法序号。对于 `j5.i.I(Pair)`、`p5.c.a(int)` 等混淆方法，如果名称改变，会在已确认的 owner 类内按唯一签名尝试解析；如果有多个候选，则直接拒绝 Hook，防止错误改写桌面布局。
+
+启动时先对关键网格符号做预检查：缺失或产生歧义时不会安装任何自定义网格 Hook。**类名整体混淆或方法语义变化无法靠函数名解析自动适配**，必须使用设备实际 APK 核验。详细规则见 [符号解析与兼容性](docs/SYMBOL_RESOLUTION.md)。
+
+本次新增 10 项解析器单元测试，加上原有 21 项网格回归测试，CI 共执行 31 项。
+
 ## 标准桌面加载边界：6 列截断修复
 
 ColorOS 标准模式启动实际采用 `OplusStandardLoaderTask → OplusBaseLoaderTask.run() → loadAndBindWorkspace() → OplusLoaderCursor`，而不是此前只考虑的 AOSP `LoaderTask.loadWorkspace()`。图标、文件夹和部分空间分配在最终校验时使用 `j5.i.I(Pair)`。此方法在没有启用平板无缝旋转的条件下直接返回传入的 IDP 网格尺寸，因此即使 `p5.c.a(0)` 被改为 8×4，加载器仍有机会使用旧的 6×4。
