@@ -6,6 +6,7 @@ import android.content.res.Configuration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -31,7 +32,14 @@ private val Accent = Color(0xFF2564D8)
 
 @Composable
 private fun ColorOsTheme(content: @Composable () -> Unit) {
-    val scheme = lightColorScheme(
+    val scheme = if (isSystemInDarkTheme()) darkColorScheme(
+        primary = Color(0xFF9DBBFF),
+        background = Color(0xFF131519),
+        onBackground = Color(0xFFF5F6F8),
+        surface = Color(0xFF22252B),
+        onSurface = Color(0xFFF5F6F8),
+        surfaceVariant = Color(0xFF30343B)
+    ) else lightColorScheme(
         primary = Accent,
         onPrimary = Color.White,
         background = CanvasColor,
@@ -70,7 +78,11 @@ private fun SettingsSurface(title: String, subtitle: String, content: @Composabl
 
 @Composable
 private fun PageFrame(title: String, summary: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxSize().background(CanvasColor)) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+    ) {
         Column(Modifier.fillMaxWidth().padding(start = 22.dp, top = 28.dp, end = 22.dp, bottom = 12.dp)) {
             Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
