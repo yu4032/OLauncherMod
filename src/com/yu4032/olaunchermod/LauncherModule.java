@@ -336,9 +336,9 @@ public final class LauncherModule extends XposedModule {
 
     private synchronized void recordMarginState(Context context,
             WorkspaceMarginConfig margins, int[] original, int[] actual) {
-        String value = "configured_dp=" + margins.serialize() + "\\n"
-                + "native_padding_px=" + java.util.Arrays.toString(original) + "\\n"
-                + "actual_padding_px=" + java.util.Arrays.toString(actual) + "\\n";
+        String value = "configured_dp=" + margins.serialize() + "\n"
+                + "native_padding_px=" + java.util.Arrays.toString(original) + "\n"
+                + "actual_padding_px=" + java.util.Arrays.toString(actual) + "\n";
         if (value.equals(lastMarginReport)) return;
         lastMarginReport = value;
         try {
@@ -352,7 +352,7 @@ public final class LauncherModule extends XposedModule {
         } catch (Throwable error) {
             log(Log.WARN, TAG, "workspace margin status unavailable: " + error);
         }
-        log(Log.INFO, TAG, "workspace padding " + value.replace('\\n', ' '));
+        log(Log.INFO, TAG, "workspace padding " + value.replace('\n', ' '));
     }
 
     private void syncWorkspaceOccupancy(Object cell, ClassLoader loader,
