@@ -73,9 +73,13 @@ public final class LauncherModule extends XposedModule {
         if (prefs.getInt("layout_cellcount_x", -1) == requestedColumns
                 && prefs.getInt("layout_cellcount_y", -1) == requestedRows) return;
 
-        Class<?> helper = Class.forName(
-                "com.android.launcher.togglebar.LayoutSettingsHelper", false, loader);
-        Method save = HookSymbols.method(helper, "saveLayoutInfo",
+        // 17.5.5 R8 moved LayoutSettingsHelper.saveLayoutInfo to zv5.o.
+        // Both symbol pairs were verified from the respective APK dex tables.
+        Class<?> helper = HookSymbols.classByAnyName(loader,
+                "zv5", "com.android.launcher.togglebar.LayoutSettingsHelper");
+        String saveName = "zv5".equals(helper.getName())
+                ? "o" : "saveLayoutInfo";
+        Method save = HookSymbols.method(helper, saveName,
                 void.class, true, false, Context.class, int.class, int.class);
         save.invoke(null, context, requestedColumns, requestedRows);
         log(Log.INFO, TAG, "persistent grid synchronized to "
@@ -179,9 +183,10 @@ public final class LauncherModule extends XposedModule {
         int y = requestedRows;
         if (x <= 0 || y <= 0) return new int[]{0, 0};
         try {
-            Class<?> rotation = Class.forName("p5.c", false, loader);
-            Method portrait = HookSymbols.method(rotation, "d", boolean.class,
-                    true, true);
+            Class<?> rotation = HookSymbols.classByAnyName(loader, "uh9", "p5.c");
+            Method portrait = HookSymbols.method(rotation,
+                    "uh9".equals(rotation.getName()) ? "c" : "d",
+                    boolean.class, true, false);
             if (x > y && Boolean.TRUE.equals(portrait.invoke(null))) {
                 return new int[]{y, x};
             }
@@ -255,7 +260,14 @@ public final class LauncherModule extends XposedModule {
         try {
             Class<?> app = Class.forName(
                     "com.android.common.LauncherApplication", false, loader);
-            Context context = (Context) app.getMethod("getAppContext").invoke(null);
+            Context context;
+            try {
+                // 17.5.5 stores its application context in public static q.
+                context = (Context) HookSymbols.field(app, "q",
+                        Context.class, true, false).get(null);
+            } catch (ReflectiveOperationException notVersion1755) {
+                context = (Context) app.getMethod("getAppContext").invoke(null);
+            }
             if (context != null && context.getExternalFilesDir(null) != null) {
                 File path = new File(context.getExternalFilesDir(null),
                         "launcher_loader_status");
@@ -398,11 +410,15 @@ public final class LauncherModule extends XposedModule {
                             log(Log.ERROR, TAG, "IDP axes mismatch after init: "
                                     + x + "x" + y + " expected " + target[0] + "x" + target[1]);
                         }
-                        Class<?> config = Class.forName("com.android.launcher.c6", false, loader);
+                        Class<?> config = HookSymbols.classByAnyName(loader,
+                                "wjb", "com.android.launcher.c6");
+                        boolean newConfig = "wjb".equals(config.getName());
                         java.lang.reflect.Field xField = HookSymbols.field(
-                                config, "f1273g", int.class, true, false);
+                                config, newConfig ? "h" : "f1273g",
+                                int.class, true, false);
                         java.lang.reflect.Field yField = HookSymbols.field(
-                                config, "h", int.class, true, false);
+                                config, newConfig ? "i" : "h",
+                                int.class, true, false);
                         xField.setInt(null, x);
                         yField.setInt(null, y);
                         log(Log.INFO, TAG, "IDP final grid " + x + "x" + y
@@ -427,14 +443,14 @@ public final class LauncherModule extends XposedModule {
         // PERMANENTLY deletes their database records. Keep the cache and both
         // orientation-specific accessors on the same configured dimensions.
         try {
-            Class<?> rotation = Class.forName("p5.c", false, loader);
+            Class<?> rotation = HookSymbols.classByAnyName(loader, "uh9", "p5.c");
             Class<?> pair = Class.forName("kotlin.Pair", false, loader);
             java.lang.reflect.Constructor<?> pairCtor = pair.getConstructor(
                     Object.class, Object.class);
             java.lang.reflect.Field landscapeCache = HookSymbols.field(
                     rotation, "a", pair, true, true);
             Method dimensions = HookSymbols.method(rotation, "a", pair,
-                    true, true, int.class);
+                    true, false, int.class);
             log(Log.INFO, TAG, "resolved rotation symbol: " + dimensions);
             hook(dimensions).intercept(chain -> {
                 refresh();
@@ -580,7 +596,8 @@ public final class LauncherModule extends XposedModule {
         // Its result also feeds RotationLayoutUtils, so keeping it in sync
         // prevents a later orientation pass from restoring the stock 6-column grid.
         try {
-            Class<?> gridConfig = Class.forName("com.android.launcher.c6", false, loader);
+            Class<?> gridConfig = HookSymbols.classByAnyName(loader,
+                    "wjb", "com.android.launcher.c6");
             // b(Context) and c(Context) both return int[]. A signature-only
             // fallback is ambiguous, so this entry must retain a known name.
             Method read = HookSymbols.method(gridConfig, "b", int[].class,
@@ -601,8 +618,9 @@ public final class LauncherModule extends XposedModule {
         // across versions, the loader's COMPACT/FREE query remained stock,
         // and its COMPACT branch repacked 7th/8th column icons at startup.
         try {
-            Class<?> arrangement = Class.forName(
-                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Class<?> arrangement = HookSymbols.classByAnyName(loader,
+                    "com.android.launcher.layout.i",
+                    "com.android.launcher.layout.LayoutUtilsManager");
             Method isCompact = HookSymbols.method(arrangement, "c",
                     boolean.class, true, true);
             hook(isCompact).intercept(chain -> {
@@ -624,8 +642,9 @@ public final class LauncherModule extends XposedModule {
         }
 
         try {
-            Class<?> arrangement = Class.forName(
-                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Class<?> arrangement = HookSymbols.classByAnyName(loader,
+                    "com.android.launcher.layout.i",
+                    "com.android.launcher.layout.LayoutUtilsManager");
             Method setMode = HookSymbols.method(arrangement, "e",
                     void.class, true, true, boolean.class);
             hook(setMode).intercept(chain -> {
@@ -641,8 +660,9 @@ public final class LauncherModule extends XposedModule {
         }
 
         try {
-            Class<?> arrangement = Class.forName(
-                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Class<?> arrangement = HookSymbols.classByAnyName(loader,
+                    "com.android.launcher.layout.i",
+                    "com.android.launcher.layout.LayoutUtilsManager");
             Method initMode = HookSymbols.method(arrangement, "b",
                     void.class, true, true, Context.class);
             hook(initMode).intercept(chain -> {
@@ -721,12 +741,14 @@ public final class LauncherModule extends XposedModule {
         // It must return the canonical LANDSCAPE workspace dimensions: the
         // paired another-cell (portrait) coordinates use p5.c.a(1) instead.
         try {
-            Class<?> helperClass = Class.forName("j5.i", false, loader);
+            Class<?> helperClass = HookSymbols.classByAnyName(loader,
+                    "yn9", "j5.i");
             Class<?> pairClass = Class.forName("kotlin.Pair", false, loader);
             Constructor<?> pairConstructor = pairClass.getConstructor(
                     Object.class, Object.class);
-            Method effective = HookSymbols.method(helperClass, "I",
-                    pairClass, false, true, pairClass);
+            Method effective = HookSymbols.method(helperClass,
+                    "yn9".equals(helperClass.getName()) ? "v" : "I",
+                    pairClass, false, false, pairClass);
             log(Log.INFO, TAG, "resolved model loader boundary symbol: " + effective);
             hook(effective).intercept(chain -> {
                 Object nativeResult = chain.proceed();

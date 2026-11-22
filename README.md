@@ -47,7 +47,29 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 **debug-6 回归修复：**启动预检查仅用于诊断 IDP 与工作区网格入口，不再拥有全局阻止 Hook 的权限。工作区、加载器、旋转和排列模式逐项解析、独立安装；任意单一符号失败只影响对应功能，不再把已经有效的 8×4 工作区整体退回 6×4。**类名整体混淆或方法语义变化无法靠函数名解析自动适配**，必须使用设备实际 APK 核验。详细规则见 [符号解析与兼容性](docs/SYMBOL_RESOLUTION.md)。
 
-符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 43 项。
+符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
+
+## 针对真实 17.5.5 APK 的 DEX 符号适配
+
+2026-11-22 从目标 APK `OplusLauncher-17.5.5.apk` 的二进制 `AndroidManifest.xml` 验证：版本 `17.5.5`，versionCode `170050005`，SHA-256 `b487204310bb5c8180ac3092950a258581c4468793541bbcea21f9aa6dd67b56`。直接解析四个 DEX，确认旧归档 **17.3.9** 的关键混淆 owner 已全部变化：
+
+| 功能 | 旧 17.3.9 | 实际 17.5.5 |
+|---|---|---|
+| 模型加载最终边界 | `j5.i.I(Pair)` | `yn9.v(Pair)` |
+| 网格旋转/缓存 | `p5.c.a(int)` / `p5.c.d()` | `uh9.a(int)` / `uh9.c()` |
+| 读取原生网格 | `com.android.launcher.c6.b(Context)` | `wjb.b(Context)` |
+| COMPACT/FREE 管理器 | `LayoutUtilsManager.b/c/e` | `com.android.launcher.layout.i.b/c/e` |
+| 持久化网格配置 | `LayoutSettingsHelper.saveLayoutInfo` | `zv5.o(Context,int,int)` |
+| 原生网格缓存字段 | `c6.f1273g/h` | `wjb.h/i` |
+| Loader 状态日志应用上下文 | `LauncherApplication.getAppContext()` | `LauncherApplication.q`（Context 静态字段） |
+
+**DEX 直接证据**：17.5.5 的 `OplusLoaderCursor.checkItemPlacement` FREE 分支（`classes.dex` PC `0x0261`）调用 `yn9.v(Pair)`。该方法在无需 seamless rotation 时直接返回传入的 IDP 网格；其他路径经 `uh9.a(int)` 访问独立旋转网格缓存。`OplusInvariantDeviceProfile.injectPreInitGridExt` 直接读取 `wjb.b(Context)` 并写 `wjb.h/i`。
+
+新 Hook 同时支持两组**已知 owner + 完整签名**。它不搜索 DEX 中任意匹配签名的方法，不使用机器码或固定偏移；遇到未知第三个版本仍需检查其 APK。模型加载边界日志现在可以通过 17.5.5 的实际 `LauncherApplication.q` Context 写入。
+
+另外，`WorkspaceItemProcessor.processItem` 把 `itemType=5/99` 交给 `processWidget()`，`itemType=100` 交给 `processCard()`。普通小组件保护由错误的 4 修正为 5；天气卡片则属于卡片加载分支，且需要同时确认模型边界与其他图标的占用冲突。
+
+**本次是依据 17.5.5 的真实 DEX 修正 Hook 安装位置，不代表已有天气卡片和图标的重复坐标已被自动恢复。** 需要安装测试后以 `launcher_loader_status` 及 `OplusLoaderCursor` 的真实日志确认加载器边界是否为 8×4；重启前备份桌面。
 
 ## 7、8 列启动重排和小组件消失：数据保全修复
 

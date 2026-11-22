@@ -121,27 +121,29 @@ public class GridIntegrityTest {
     }
 
     @Test public void protectsWidgetFromTemporaryProviderGap() {
-        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 5,
                 "Deleting widget that isn't installed anymore: null", true));
         assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 99,
                 "Unrestored widget removed: test", true));
     }
 
     @Test public void protectsWidgetSpanAndPlacementDuringGridChanges() {
-        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 5,
                 "Widget has invalid size: 0x2", true));
-        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 5,
                 "Item position overlap", true));
     }
 
     @Test public void preservesNativeUnrelatedWidgetCleanup() {
-        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 5,
                 "unflatten component name error", true));
-        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 5,
                 "Unrestored widget removed: missing", false));
-        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-101, 4,
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-101, 5,
                 "Widget has invalid size: 0x2", true));
         assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 0,
+                "Widget has invalid size: 0x2", true));
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
                 "Widget has invalid size: 0x2", true));
     }
 

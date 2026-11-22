@@ -99,7 +99,7 @@ final class GridIntegrity {
     static boolean shouldRetainWidgetLoaderRow(int container, int itemType,
             String reason, boolean customGridEnabled) {
         if (!customGridEnabled || container != -100 || reason == null
-                || (itemType != 4 && itemType != 99)) return false;
+                || (itemType != 5 && itemType != 99)) return false;
         return reason.startsWith("Item position overlap")
                 || reason.startsWith("Widget has invalid size")
                 || reason.startsWith("Unrestored widget removed")

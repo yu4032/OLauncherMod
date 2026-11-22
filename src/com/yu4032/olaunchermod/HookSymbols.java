@@ -33,6 +33,30 @@ final class HookSymbols {
                 int.class, int.class);
     }
 
+    /**
+     * Resolve an owner from a small list of class names verified in archived
+     * and currently installed APK bytecode. Never scan unrelated dex classes.
+     */
+    static Class<?> classByAnyName(ClassLoader loader, String... knownNames)
+            throws ClassNotFoundException {
+        if (loader == null || knownNames == null || knownNames.length == 0) {
+            throw new IllegalArgumentException("missing known owner names");
+        }
+        ClassNotFoundException last = null;
+        for (String owner : knownNames) {
+            if (owner == null || owner.isEmpty()) {
+                throw new IllegalArgumentException("blank owner name");
+            }
+            try {
+                return Class.forName(owner, false, loader);
+            } catch (ClassNotFoundException e) {
+                last = e;
+            }
+        }
+        throw new ClassNotFoundException("No verified owner found among "
+                + Arrays.toString(knownNames), last);
+    }
+
     static Method method(Class<?> owner, String name, Class<?> result,
             boolean staticMethod, boolean allowUniqueFallback,
             Class<?>... parameters) throws ReflectiveOperationException {

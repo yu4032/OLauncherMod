@@ -1,5 +1,13 @@
 # Java/ART 函数名及签名解析（无固定偏移）
 
+## 已确认的 17.5.5 符号迁移（2026-11-22）
+
+之前的签名回退仍要求找到原 owner `j5.i/p5.c/com.android.launcher.c6`。这些类在 17.5.5 **不再存在**，因此回退从未执行。现在增加 `HookSymbols.classByAnyName()`，仅允许从反编译已确认的类名列表选择 owner，并继续验证目标方法的完整签名。
+
+新版本关键 owner：`yn9.v(Pair):Pair`（最终 Loader 边界）、`uh9.a(int):Pair`（旋转缓存）、`uh9.c():boolean`、`wjb.b(Context):int[]`（IDP 数据源）、`com.android.launcher.layout.i.c():boolean`（COMPACT）、`zv5.o(Context,int,int):void`（持久化设置）。当新版本类不存在时才尝试旧版 owner。
+
+直接 DEX 证据与未解决问题的边界见 [ColorRE 17.5.5 审计](https://github.com/yu4032/ColorRE/blob/main/research/launcher-grid/2026-11-22-1755-symbol-audit.md)。签名解析通过、CI 编译成功都不等于物理设备已经恢复 7/8 列或天气卡片。
+
 ## 当前实现
 
 OLauncherMod 使用 LSPosed API 102 对 `java.lang.reflect.Method` 和 `Constructor` 安装 Hook；它不对 native 机器码、dex method index、内存地址或固定偏移进行 Hook。此前缺乏统一的验证机制，直接以 `getDeclaredMethod("I", Pair.class)`、`getDeclaredMethod("a", int.class)`、`getDeclaredField("a")` 等方式绑定混淆名称，版本更新后可能失效。

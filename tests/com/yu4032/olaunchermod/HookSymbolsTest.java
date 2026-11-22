@@ -55,6 +55,22 @@ public class HookSymbolsTest {
         } catch (NoSuchMethodException expected) { }
     }
 
+    @Test public void selectsOnlyVerifiedRenamedOwners() throws Exception {
+        Class<?> actual = HookSymbols.classByAnyName(
+                HookSymbolsTest.class.getClassLoader(),
+                "nonexistent.coloros.ObfuscatedOwner",
+                HookSymbolsTest.class.getName() + "$Fixture");
+        assertSame(Fixture.class, actual);
+    }
+
+    @Test public void rejectsUnverifiedOwnerNames() throws Exception {
+        try {
+            HookSymbols.classByAnyName(HookSymbolsTest.class.getClassLoader(),
+                    "old.OwnerDoesNotExist", "new.OwnerDoesNotExist");
+            fail("must not silently scan the dex for an unrelated class");
+        } catch (ClassNotFoundException expected) { }
+    }
+
     @Test public void resolvesByNameAndSignature() throws Exception {
         Method m = HookSymbols.method(Fixture.class, "named", String.class, true,
                 false, int.class);
