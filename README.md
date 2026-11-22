@@ -27,13 +27,3 @@ META-INF/xposed/                              模块元数据（API 102）
 AndroidManifest.xml
 reflow.py                                     离线重排脚本
 ```
-
-## 离线重排
-
-```
-python3 reflow.py launcher.db 8 4
-```
-
-## 构建
-
-依赖 `io.github.libxposed:api:102.0.0`，产物为模块 APK（`out/Y700Launcher102.apk`）。
