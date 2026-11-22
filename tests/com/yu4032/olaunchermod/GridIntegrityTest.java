@@ -99,6 +99,27 @@ public class GridIntegrityTest {
                 "Item position overlap", 100, 7, 1, 1, 1, 8, 4));
     }
 
+    @Test public void canonicalLoaderBoundsOverrideStaleSixColumns() {
+        assertArrayEquals(new int[]{8, 4},
+                GridIntegrity.canonicalLoaderBounds(8, 4, 6, 4));
+    }
+
+    @Test public void canonicalLoaderBoundsAreLandscapeEvenForPortraitIdp() {
+        assertArrayEquals(new int[]{8, 4},
+                GridIntegrity.canonicalLoaderBounds(8, 4, 4, 8));
+    }
+
+    @Test public void nativeLoaderBoundsPassThroughWithoutConfiguration() {
+        assertArrayEquals(new int[]{6, 4},
+                GridIntegrity.canonicalLoaderBounds(0, 0, 6, 4));
+    }
+
+    @Test public void destructiveMigrationRequiresCanonicalTarget() {
+        assertFalse(GridIntegrity.isCanonicalMigrationTarget(8, 4, 6, 4));
+        assertFalse(GridIntegrity.isCanonicalMigrationTarget(8, 4, 4, 8));
+        assertTrue(GridIntegrity.isCanonicalMigrationTarget(8, 4, 8, 4));
+    }
+
     @Test public void allowsPortraitCellsAndWidgets() {
         assertTrue(GridIntegrity.canPreserveExpansion(6, 4, 8, 4,
                 Arrays.asList(new GridIntegrity.Placement(0, 1, 1, 2, 2, 0, 3),

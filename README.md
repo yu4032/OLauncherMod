@@ -41,6 +41,14 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 **注意：此修复阻止后续重启继续发生相同的数据删除，但不会自动恢复之前已从桌面数据库删除的图标记录。** 已删除的快捷方式应从桌面备份恢复，或者重新添加到工作区。更改前请先备份桌面布局。
 
+## 标准桌面加载边界：6 列截断修复
+
+ColorOS 标准模式启动实际采用 `OplusStandardLoaderTask → OplusBaseLoaderTask.run() → loadAndBindWorkspace() → OplusLoaderCursor`，而不是此前只考虑的 AOSP `LoaderTask.loadWorkspace()`。图标、文件夹和部分空间分配在最终校验时使用 `j5.i.I(Pair)`。此方法在没有启用平板无缝旋转的条件下直接返回传入的 IDP 网格尺寸，因此即使 `p5.c.a(0)` 被改为 8×4，加载器仍有机会使用旧的 6×4。
+
+修复将 **`j5.i.I(Pair)` 固定为自定义横屏网格**，并在设置界面显示 `native_loader_bounds` 与 `effective_loader_bounds`，同时保留先前工作区 `actual_workspace` 报告。在备用 AOSP 加载器的网格迁移入口，如果 IDP 的目标尺寸不是配置的规范横屏尺寸，阻止它以 6×4 或暂时转置的 4×8 执行破坏性迁移。
+
+新的 CI 包含 21 项布局回归测试，尤其覆盖 6×4 → 8×4、竖屏 IDP 转置与非法缩小迁移判断。仍需真机验证图标是否保留，单元测试不能代替设备检查。
+
 ## 系统性一致性修复
 
 - 原生排布模式由 `LayoutUtilsManager` 的 `layout_is_compact` 持久化字段和运行时选择器共同控制。启用「保留空位」会令启动加载器及拖拽使用 FREE 分支，而非只拦截界面填空行为。
@@ -50,7 +58,7 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 - 如果原生迁移失败，阻断该次 `LoaderTask` 随后发起的自动 `create_empty_db`（仍记录错误），避免迁移问题扩大为桌面数据清空；不影响主动重置桌面。
 - 配置在桌面进程启动时读取一次；修改配置必须重启 Launcher，不允许运行中动态切换网格。
 - 开关恢复原生排列时会恢复此前保存的 COMPACT/FREE 选择，不会把系统设置永久改为 FREE。
-- `GridIntegrity` 使用纯 Java 边界与占用校验，17 个 JUnit 回归测试随 CI 执行；这个测试不能替代设备端的重启和旋转验收。
+- `GridIntegrity` 使用纯 Java 边界与占用校验，21 个 JUnit 回归测试随 CI 执行；这个测试不能替代设备端的重启和旋转验收。
 
 完整范围与剩余验证点参见 [布局生命周期审计](docs/LAYOUT_AUDIT.md)。
 

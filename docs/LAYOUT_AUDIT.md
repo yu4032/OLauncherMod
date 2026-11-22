@@ -10,14 +10,18 @@
 2. **IDP**：`OplusInvariantDeviceProfile.injectPreInitGridExt()` → `InvariantDeviceProfile.setColumnsAndRows()` → `DeviceProfile`。
 3. **方向**：`p5.c.a(0/1)` 的横竖屏缓存；`j5.i.I(Pair)` 有条件读取该缓存。
 4. **工作区**：`OplusCellLayout` 构造、`setGridCellSize()`、二参数 `setGridSize()` 和基类三参数 `CellLayout.setGridSize()`，最终 `mCountX/mCountY` 和 `GridOccupancy` 必须匹配。
-5. **数据加载**：`OplusLoaderCursor.checkItemPlacement()` 按布局模式分别走 FREE/COMPACT 逻辑，并判断边界和占用；`OplusBaseLoaderTask` 的局部页面加载同样会使用该逻辑。
-6. **迁移与删除**：`DeviceGridState` → `GridSizeMigrationTaskV2`；`LoaderCursor.markDeleted()` → `commitDeleted()`；迁移返回 false 时 `LoaderTask.loadWorkspace()` 调用 `create_empty_db`。
-7. **配置变更**：模块设置界面在保存后强制结束 Launcher 进程；运行中的 Hook 使用一次加载的不可变配置，避免数据库/界面看到两组尺寸。
+5. **标准模式真正的加载器**：`OplusStandardLoaderTask → OplusBaseLoaderTask.run() → loadAndBindWorkspace() → OplusLoaderCursor`。与基础 `LoaderTask.loadWorkspace()` 不同，标准模式通过逐页加载，不一定经过 `GridSizeMigrationTaskV2.migrateGridIfNeeded()`；原先仅检查迁移入口的保护覆盖不足。
+6. **最终数据库边界**：`j5.i.I(Pair)` 会按平板无缝旋转开关选择 `p5.c.a(0)` 或直接返回传入的 IDP 尺寸。此处同时服务 `OplusLoaderCursor.checkItemPlacement()`、基础 `LoaderCursor` 和 `l4.b/l4.e` 空间分配。必须直接统一规范横屏目标尺寸。
+7. **数据加载**：`OplusLoaderCursor.checkItemPlacement()` 按布局模式分别走 FREE/COMPACT 逻辑，并判断边界和占用；`OplusBaseLoaderTask` 的局部页面加载同样会使用该逻辑。
+8. **迁移与删除**：`DeviceGridState` → `GridSizeMigrationTaskV2`；`LoaderCursor.markDeleted()` → `commitDeleted()`；迁移返回 false 时 `LoaderTask.loadWorkspace()` 调用 `create_empty_db`。
+9. **配置变更**：模块设置界面在保存后强制结束 Launcher 进程；运行中的 Hook 使用一次加载的不可变配置，避免数据库/界面看到两组尺寸。
 
 ## 审计矩阵
 
 | 优先级 | 路径 / 风险 | 处理方式 | 验证层级 |
 |---|---|---|---|
+| P0 | `OplusBaseLoaderTask` 标准模式未使用基础 `LoaderTask.loadWorkspace`，此前迁移补丁不覆盖主路径 | 审查实际启动与逐屏加载流程，并直接统一 `j5.i.I(Pair)` 最终边界 | 反编译主调用链已验证；待真机 |
+| P0 | `j5.i.I(Pair)` 在特定设备配置下直接返回 6×4 的 IDP，即使 `p5.c.a(0)` 为 8×4 | 在唯一最终规范化入口返回配置的横屏网格；记录原生值和强制结果 | 已加 4 项回归测试；待真机 |
 | P0 | `OplusLoaderCursor.checkItemPlacement` 使用旧横屏 6×4，把第 7、8 列识别为越界 | 同步 `p5.c.a(0/1)`、IDP、工作区尺寸 | 方法调用核对；待设备复测 |
 | P0 | `markDeleted("Item position overlap")` 会进入 `commitDeleted` 永久删记录 | 对 **在配置范围内且仅因位置冲突被拒绝** 的工作区条目保留数据库记录并记录 ERROR；不会将冲突项强行添加到工作区 | 单元测试 + 设备复测 |
 | P0 | `migrateGridIfNeeded=false` 后 `LoaderTask` 请求 `create_empty_db` | 只阻断**此次迁移失败之后同一加载线程**的清库调用，不影响主动清空数据库 | 静态调用链；待异常注入复测 |
@@ -41,7 +45,7 @@
 
 `tests/com/yu4032/olaunchermod/GridIntegrityTest.java` 覆盖：扩大列数、稀疏位置、缩小/不变尺寸、跨界小组件、同屏重复位置、跨屏相同位置、竖屏越界、竖屏重叠、半缺失坐标、非正跨度、整数溢出、布局删除保护条件与不保护其他删除原因。
 
-在 CI 中执行 `gradle testDebugUnitTest assembleDebug`，成功之后再验证 APK 中的 LSPosed 入口和作用域。
+当前共 21 项 JUnit 回归测试。在 CI 中执行 `gradle testDebugUnitTest assembleDebug`，成功之后再验证 APK 中的 LSPosed 入口和作用域。
 
 ## 真机验收序列
 
@@ -52,7 +56,7 @@
 3. 在第一屏及第二屏制造正常空位，删除/移动图标、合并和拆分文件夹，确认 FREE 排列不会自动压缩。
 4. 旋转至竖屏、回到横屏并再次重启，核对 `vCellX/vCellY` 与 `p5.c.a(1)`。
 5. 关闭「保留空位」，检查恢复原生排列模式；再开启，检查 FREE 路径。
-6. 检查 `launcher_grid_status` 和 `OLauncherMod` 过滤日志，并对比数据库行数。出现 `native grid migration failed`、`preserved rejected workspace DB row` 等警报时，停止追加布局更改，先核查数据。
+6. 同时检查 `launcher_grid_status`、`launcher_loader_status` 和 `OLauncherMod` 过滤日志，并对比数据库行数。出现 `native grid migration failed`、`preserved rejected workspace DB row` 等警报时，停止追加布局更改，先核查数据。
 
 ## 尚不能由静态审计证明的事项
 

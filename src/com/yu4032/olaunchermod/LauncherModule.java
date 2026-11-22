@@ -34,6 +34,7 @@ public final class LauncherModule extends XposedModule {
     private boolean configInitialized;
     private volatile String lastRotationGridLog = "";
     private volatile String lastGridReport = "";
+    private volatile String lastLoaderBoundsReport = "";
     private final ThreadLocal<Boolean> migrationResetPending = new ThreadLocal<>();
 
     private synchronized void refresh() {
@@ -222,6 +223,35 @@ public final class LauncherModule extends XposedModule {
         } catch (Throwable error) {
             log(Log.WARN, TAG, "unable to record actual grid: " + error);
         }
+    }
+
+    /**
+     * Record the actual boundary given to the ColorOS model loader. Unlike
+     * CellLayout.getCountX(), this determines whether a saved row will survive
+     * OplusLoaderCursor.checkItemPlacement() and the FindSpaceHelper passes.
+     */
+    private synchronized void recordLoaderBounds(ClassLoader loader,
+            Object nativeBounds, int finalColumns, int finalRows) {
+        String value = "native_loader_bounds=" + nativeBounds + "\n"
+                + "effective_loader_bounds=" + finalColumns + "x" + finalRows + "\n"
+                + "configured_landscape=" + requestedColumns + "x" + requestedRows + "\n";
+        if (value.equals(lastLoaderBoundsReport)) return;
+        lastLoaderBoundsReport = value;
+        try {
+            Class<?> app = Class.forName(
+                    "com.android.common.LauncherApplication", false, loader);
+            Context context = (Context) app.getMethod("getAppContext").invoke(null);
+            if (context != null && context.getExternalFilesDir(null) != null) {
+                File path = new File(context.getExternalFilesDir(null),
+                        "launcher_loader_status");
+                try (java.io.FileOutputStream output = new java.io.FileOutputStream(path)) {
+                    output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "loader status persistence unavailable: " + error);
+        }
+        log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
     }
 
     private void ensureWorkspaceGrid(Object cell, Context context,
@@ -530,6 +560,45 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "native FREE arrangement hooks failed: " + error);
         }
 
+        // THIS is the shared, final boundary used by the real ColorOS
+        // OplusStandardLoaderTask -> OplusBaseLoaderTask -> OplusLoaderCursor
+        // path. On non-seamless-rotation configurations, I(Pair) returns
+        // its input IDP values and never calls p5.c.a(0), so patching only
+        // p5.c.a(0) does not protect columns 7 and 8 from model trimming.
+        //
+        // The same method is used by LoaderCursor and FindSpaceHelper.
+        // It must return the canonical LANDSCAPE workspace dimensions: the
+        // paired another-cell (portrait) coordinates use p5.c.a(1) instead.
+        try {
+            Class<?> helperClass = Class.forName("j5.i", false, loader);
+            Class<?> pairClass = Class.forName("kotlin.Pair", false, loader);
+            Constructor<?> pairConstructor = pairClass.getConstructor(
+                    Object.class, Object.class);
+            Method effective = helperClass.getDeclaredMethod("I", pairClass);
+            hook(effective).intercept(chain -> {
+                Object nativeResult = chain.proceed();
+                if (requestedColumns <= 0 || requestedRows <= 0) {
+                    return nativeResult;
+                }
+                try {
+                    int[] canonical = GridIntegrity.canonicalLoaderBounds(
+                            requestedColumns, requestedRows, 0, 0);
+                    Object result = pairConstructor.newInstance(
+                            Integer.valueOf(canonical[0]),
+                            Integer.valueOf(canonical[1]));
+                    recordLoaderBounds(loader, nativeResult,
+                            canonical[0], canonical[1]);
+                    return result;
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "final loader bounds override failed: " + error);
+                    return nativeResult;
+                }
+            });
+            log(Log.INFO, TAG, "final model/loader grid bounds hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "final model/loader grid bounds hook failed: " + error);
+        }
+
         // Workspace pages are initialized from the IDP inside CellLayout's
         // constructor. Correct the actual grid after OplusCellLayout is ready,
         // before workspace items are bound to the page.
@@ -679,7 +748,30 @@ public final class LauncherModule extends XposedModule {
                 refresh();
                 migrationResetPending.remove();
                 try {
-                    if (preserveExpansion((Context) chain.getArgs().get(0), loader)) {
+                    Context context = (Context) chain.getArgs().get(0);
+                    if (requestedColumns > 0 && requestedRows > 0) {
+                        Class<?> app = Class.forName(
+                                "com.android.launcher3.LauncherAppState", false, loader);
+                        Object idp = app.getMethod("getIDP", Context.class).invoke(null, context);
+                        if (idp == null) {
+                            log(Log.ERROR, TAG, "skip destructive migration: IDP unavailable");
+                            return Boolean.TRUE;
+                        }
+                        int actualX = integer(idp, "getNumColumns");
+                        int actualY = integer(idp, "getNumRows");
+                        if (!GridIntegrity.isCanonicalMigrationTarget(
+                                requestedColumns, requestedRows, actualX, actualY)) {
+                            // Migration writes coordinates from the IDP to
+                            // singledesktopitems. A transient 6-column or
+                            // portrait 4x8 IDP is NOT a canonical 8x4
+                            // migration target. Do not let it repack the DB.
+                            log(Log.ERROR, TAG, "skip destructive migration: IDP "
+                                    + actualX + "x" + actualY + " != landscape "
+                                    + requestedColumns + "x" + requestedRows);
+                            return Boolean.TRUE;
+                        }
+                    }
+                    if (preserveExpansion(context, loader)) {
                         return Boolean.TRUE;
                     }
                 } catch (Throwable error) {

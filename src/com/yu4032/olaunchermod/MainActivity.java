@@ -164,14 +164,19 @@ public final class MainActivity extends Activity {
     private void loadRuntimeStatus() {
         String content = runRootRead("cat " + DIR
                 + "/launcher_grid_status 2>/dev/null");
-        if (content.isEmpty()) {
-            runtimeStatus.setText("尚未收到桌面工作区报告。请确认 LSPosed 已启用模块、"
-                    + "勾选 com.android.launcher，重启桌面后再刷新。");
-        } else {
-            runtimeStatus.setText("Launcher 实际网格：\n" + content
-                    + "\n注意：expected_workspace / actual_workspace "
-                    + "应相同。若不同请提供此状态和 LSPosed 日志。");
-        }
+        String loaderContent = runRootRead("cat " + DIR
+                + "/launcher_loader_status 2>/dev/null");
+        String workspaceReport = content.isEmpty()
+                ? "尚无工作区报告：请确认 LSPosed 作用域后重启桌面。"
+                : content;
+        String loaderReport = loaderContent.isEmpty()
+                ? "尚无加载器边界报告：说明 j5.i.I 尚未调用，"
+                    + "或最终边界 Hook 未安装。检查 LSPosed 日志。"
+                : loaderContent;
+        runtimeStatus.setText("工作区实际网格：\n" + workspaceReport
+                + "\n启动加载器边界：\n" + loaderReport
+                + "\n两项都应显示横屏 8x4（竖屏工作区会转置）。"
+                + "若图标仍丢失，请提供此报告和 OLauncherMod 日志。");
     }
 
     private void applyGrid() {
@@ -195,6 +200,7 @@ public final class MainActivity extends Activity {
                 + " && printf '%s\\n' '" + config + "' > " + GRID
                 + " && chmod 644 " + GRID
                 + " && rm -f " + DIR + "/launcher_grid_status"
+                + " " + DIR + "/launcher_loader_status"
                 + " && am force-stop com.android.launcher");
         if (saved) {
             status.setText("已保存横屏网格 " + columns + " 列 × " + rows

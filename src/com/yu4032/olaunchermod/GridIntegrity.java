@@ -88,6 +88,25 @@ final class GridIntegrity {
                 && inside(x, y, spanX, spanY, cols, rows);
     }
 
+    /**
+     * Canonical grid bounds for persisted horizontal cellX/cellY coordinates.
+     * Callers may offer a stale IDP grid (such as 6x4 or rotated 4x8).
+     */
+    static int[] canonicalLoaderBounds(int configuredColumns, int configuredRows,
+            int nativeColumns, int nativeRows) {
+        if (configuredColumns >= 1 && configuredRows >= 1) {
+            return new int[]{configuredColumns, configuredRows};
+        }
+        return new int[]{nativeColumns, nativeRows};
+    }
+
+    static boolean isCanonicalMigrationTarget(int configuredColumns,
+            int configuredRows, int targetColumns, int targetRows) {
+        return configuredColumns > 0 && configuredRows > 0
+                && configuredColumns == targetColumns
+                && configuredRows == targetRows;
+    }
+
     private GridIntegrity() {
     }
 }
