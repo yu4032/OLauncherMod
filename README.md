@@ -49,6 +49,16 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
 
+## 修复 17.5.5 竖屏仍保持 8×4（显示方向与模型边界）
+
+在真实 17.5.5 DEX 中，`uh9.c():boolean` 只检查 `yn9.m()` 和 `i94.s(yn9.e)`，**不是**当前屏幕方向检测；`InvariantDeviceProfile.setColumnsAndRows` 仅在该特性判断为真且原始列数大于行数时才交换两轴。之前的 `effectiveWorkspaceGrid()` 错误地使用 `uh9.c` 当竖屏判断，`yn9.v(Pair)` 更是始终返回 8×4，导致横竖屏不同步。
+
+本次增加 `GridOrientation.current(Context, ...)` 以默认显示器的 `Display.getRealSize()` 为主、应用 `Configuration.orientation` 为后备，统一确定**横屏 8×4，竖屏 4×8**。同一逻辑接入 IDP 最终列行、`OplusCellLayout.setGridSize` 两种重载、`setGridCellSize`、构造时工作区检查以及 `yn9.v(Pair)` 的最终模型边界。真实屏幕尺寸无法读取时仅参考 native 结果的轴方向，不误将 `uh9.c()` 当作方向。
+
+保留 `uh9.a(0/1)` 的原生**显式方向参数语义**：该 API 的 0/1 要求固定方向的布局尺寸，不代表当前物理方向。本次不更改 `vCellX/vCellY` 或卡片跨度，也不自动搬运可能冲突的天气卡片或图标。新增 8 项单元测试覆盖 0°/90°/180°/270° 对应的屏幕宽高、方向配置与真实显示尺寸不一致时以物理尺寸为准、屏幕未就绪时的回退。
+
+当前源码的修改必须通过 CI **和**真机方向切换确认；此前 CI #10 是过时提交，不能代表此修复。
+
 ## 针对真实 17.5.5 APK 的 DEX 符号适配
 
 2026-11-22 从目标 APK `OplusLauncher-17.5.5.apk` 的二进制 `AndroidManifest.xml` 验证：版本 `17.5.5`，versionCode `170050005`，SHA-256 `b487204310bb5c8180ac3092950a258581c4468793541bbcea21f9aa6dd67b56`。直接解析四个 DEX，确认旧归档 **17.3.9** 的关键混淆 owner 已全部变化：

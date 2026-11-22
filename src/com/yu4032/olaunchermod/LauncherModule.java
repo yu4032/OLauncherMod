@@ -176,24 +176,59 @@ public final class LauncherModule extends XposedModule {
     }
 
 
-    // On ColorOS tablets the native orientation helper swaps the persisted
-    // landscape grid while in portrait. Match that exact rule at every layer.
-    private int[] effectiveWorkspaceGrid(ClassLoader loader) {
-        int x = requestedColumns;
-        int y = requestedRows;
-        if (x <= 0 || y <= 0) return new int[]{0, 0};
+    // LauncherApplication.q is set in attachBaseContext on 17.5.5,
+    // before the IDP and model loader start.
+    private Context launcherContext(ClassLoader loader) {
         try {
-            Class<?> rotation = HookSymbols.classByAnyName(loader, "uh9", "p5.c");
-            Method portrait = HookSymbols.method(rotation,
-                    "uh9".equals(rotation.getName()) ? "c" : "d",
-                    boolean.class, true, false);
-            if (x > y && Boolean.TRUE.equals(portrait.invoke(null))) {
-                return new int[]{y, x};
-            }
-        } catch (Throwable error) {
-            log(Log.WARN, TAG, "rotation helper unavailable; using stored grid: " + error);
+            Class<?> app = Class.forName(
+                    "com.android.common.LauncherApplication", false, loader);
+            Object value = HookSymbols.field(app, "q", Context.class,
+                    true, false).get(null);
+            return value instanceof Context ? (Context) value : null;
+        } catch (Throwable ignored) {
+            return null;
         }
-        return new int[]{x, y};
+    }
+
+    /**
+     * Stored 8x4 is a LANDSCAPE profile. The current orientation must come
+     * from the real display/configuration, NOT uh9.c(): that method is a
+     * tablet-layout feature predicate and may remain false in portrait.
+     */
+    private int[] effectiveWorkspaceGrid(ClassLoader loader) {
+        return effectiveWorkspaceGrid(launcherContext(loader), 0, 0);
+    }
+
+    private int[] effectiveWorkspaceGrid(Context context,
+            int nativeColumns, int nativeRows) {
+        return GridOrientation.current(context,
+                requestedColumns, requestedRows, nativeColumns, nativeRows);
+    }
+
+    /**
+     * The 17.5.5 IDP's setColumnsAndRows can swap only if uh9.c() allows it.
+     * Make the resulting fields agree with the physical display independently
+     * of that feature flag. No database positions or widget spans are written.
+     */
+    private void synchronizeIdpAxes(Object profile, ClassLoader loader) {
+        if (requestedColumns <= 0 || requestedRows <= 0 || profile == null) return;
+        try {
+            int[] expected = effectiveWorkspaceGrid(loader);
+            int actualX = integer(profile, "getNumColumns");
+            int actualY = integer(profile, "getNumRows");
+            if (actualX == expected[0] && actualY == expected[1]) return;
+            Class<?> idp = Class.forName(
+                    "com.android.launcher3.InvariantDeviceProfile", false, loader);
+            HookSymbols.field(idp, "mNumColumns", int.class, false, false)
+                    .setInt(profile, expected[0]);
+            HookSymbols.field(idp, "mNumRows", int.class, false, false)
+                    .setInt(profile, expected[1]);
+            log(Log.INFO, TAG, "corrected IDP orientation "
+                    + actualX + "x" + actualY + " -> "
+                    + expected[0] + "x" + expected[1]);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "IDP orientation correction failed: " + error);
+        }
     }
 
     private boolean isWorkspaceCell(Object instance) {
@@ -225,7 +260,7 @@ public final class LauncherModule extends XposedModule {
         try {
             File dir = context.getExternalFilesDir(null);
             if (dir == null) return;
-            int[] effective = effectiveWorkspaceGrid(loader);
+            int[] effective = effectiveWorkspaceGrid(context, 0, 0);
             String value = "stage=" + stage + "\n"
                     + "configured_landscape=" + requestedColumns + "x" + requestedRows + "\n"
                     + "expected_workspace=" + effective[0] + "x" + effective[1] + "\n"
@@ -308,7 +343,7 @@ public final class LauncherModule extends XposedModule {
             ClassLoader loader, String stage) {
         if (!isWorkspaceCell(cell) || requestedColumns <= 0 || requestedRows <= 0) return;
         try {
-            int[] expected = effectiveWorkspaceGrid(loader);
+            int[] expected = effectiveWorkspaceGrid(context, 0, 0);
             int[] before = actualGrid(cell);
             if (before[0] != expected[0] || before[1] != expected[1]) {
                 Method set = HookSymbols.method(cell.getClass(), "setGridSize",
@@ -363,7 +398,10 @@ public final class LauncherModule extends XposedModule {
             hook(method).intercept(chain -> {
                 refresh();
                 if (requestedColumns > 0 && requestedRows > 0) {
-                    return chain.proceed(new Object[]{requestedColumns, requestedRows});
+                    Object result = chain.proceed(
+                            new Object[]{requestedColumns, requestedRows});
+                    synchronizeIdpAxes(chain.getThisObject(), loader);
+                    return result;
                 }
                 return chain.proceed();
             });
@@ -403,6 +441,7 @@ public final class LauncherModule extends XposedModule {
                                     "setColumnsAndRows", void.class, false, false,
                                     int.class, int.class);
                             set.invoke(profile, requestedColumns, requestedRows);
+                            synchronizeIdpAxes(profile, loader);
                             x = integer(profile, "getNumColumns");
                             y = integer(profile, "getNumRows");
                         }
@@ -756,13 +795,17 @@ public final class LauncherModule extends XposedModule {
                     return nativeResult;
                 }
                 try {
-                    int[] canonical = GridIntegrity.canonicalLoaderBounds(
-                            requestedColumns, requestedRows, 0, 0);
+                    int nativeX = ((Number) pairClass.getMethod("c")
+                            .invoke(nativeResult)).intValue();
+                    int nativeY = ((Number) pairClass.getMethod("d")
+                            .invoke(nativeResult)).intValue();
+                    int[] physical = effectiveWorkspaceGrid(
+                            launcherContext(loader), nativeX, nativeY);
                     Object result = pairConstructor.newInstance(
-                            Integer.valueOf(canonical[0]),
-                            Integer.valueOf(canonical[1]));
+                            Integer.valueOf(physical[0]),
+                            Integer.valueOf(physical[1]));
                     recordLoaderBounds(loader, nativeResult,
-                            canonical[0], canonical[1]);
+                            physical[0], physical[1]);
                     return result;
                 } catch (Throwable error) {
                     log(Log.ERROR, TAG, "final loader bounds override failed: " + error);
@@ -809,7 +852,8 @@ public final class LauncherModule extends XposedModule {
                 refresh();
                 Object cell = chain.getThisObject();
                 if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
-                int[] effective = effectiveWorkspaceGrid(loader);
+                int[] effective = effectiveWorkspaceGrid(
+                        ((android.view.View) cell).getContext(), 0, 0);
                 Object result = chain.proceed(new Object[]{effective[0], effective[1]});
                 // The inherited CellLayout setter creates empty occupancy
                 // matrices, including when existing children were already bound.
@@ -839,7 +883,8 @@ public final class LauncherModule extends XposedModule {
                 refresh();
                 Object cell = chain.getThisObject();
                 if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
-                int[] effective = effectiveWorkspaceGrid(loader);
+                int[] effective = effectiveWorkspaceGrid(
+                        ((android.view.View) cell).getContext(), 0, 0);
                 boolean relayout = (Boolean) chain.getArgs().get(2);
                 Object result = chain.proceed(new Object[]{
                         effective[0], effective[1], relayout});
@@ -872,7 +917,8 @@ public final class LauncherModule extends XposedModule {
                 if (!isWorkspaceCell(chain.getThisObject()) || requestedColumns <= 0) {
                     return chain.proceed();
                 }
-                int[] effective = effectiveWorkspaceGrid(loader);
+                int[] effective = effectiveWorkspaceGrid(
+                        ((android.view.View) chain.getThisObject()).getContext(), 0, 0);
                 Object[] args = chain.getArgs().toArray();
                 args[0] = effective[0];
                 args[1] = effective[1];
