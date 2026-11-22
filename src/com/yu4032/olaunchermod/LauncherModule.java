@@ -253,6 +253,29 @@ public final class LauncherModule extends XposedModule {
         log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
     }
 
+    private void syncWorkspaceOccupancy(Object cell, ClassLoader loader,
+            String stage) {
+        if (requestedColumns <= 0 || requestedRows <= 0
+                || !isWorkspaceCell(cell)) return;
+        try {
+            String result = WorkspaceOccupancySync.afterGridReset(cell, loader);
+            if (result != null) {
+                if (result.contains("existing overlaps=")
+                        && !result.endsWith("existing overlaps=0")) {
+                    log(Log.ERROR, TAG, "workspace collision detected at "
+                            + stage + ": " + result);
+                } else if (!result.startsWith("skipped")) {
+                    log(Log.INFO, TAG, "workspace occupancy repaired at "
+                            + stage + ": " + result);
+                }
+            }
+        } catch (Throwable error) {
+            // Failed validation must not change view coordinates or the DB.
+            log(Log.ERROR, TAG, "workspace occupancy synchronization failed at "
+                    + stage + ": " + error);
+        }
+    }
+
     private void ensureWorkspaceGrid(Object cell, Context context,
             ClassLoader loader, String stage) {
         if (!isWorkspaceCell(cell) || requestedColumns <= 0 || requestedRows <= 0) return;
@@ -264,6 +287,7 @@ public final class LauncherModule extends XposedModule {
                         void.class, false, false, int.class, int.class);
                 set.invoke(cell, expected[0], expected[1]);
             }
+            syncWorkspaceOccupancy(cell, loader, stage);
             int[] after = actualGrid(cell);
             recordGridState(context, stage, loader, after[0], after[1]);
         } catch (Throwable error) {
@@ -674,6 +698,9 @@ public final class LauncherModule extends XposedModule {
                 if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
                 int[] effective = effectiveWorkspaceGrid(loader);
                 Object result = chain.proceed(new Object[]{effective[0], effective[1]});
+                // The inherited CellLayout setter creates empty occupancy
+                // matrices, including when existing children were already bound.
+                syncWorkspaceOccupancy(cell, loader, "setGridSize_2");
                 try {
                     int[] actual = actualGrid(cell);
                     recordGridState(((android.view.View) cell).getContext(),
@@ -703,6 +730,9 @@ public final class LauncherModule extends XposedModule {
                 boolean relayout = (Boolean) chain.getArgs().get(2);
                 Object result = chain.proceed(new Object[]{
                         effective[0], effective[1], relayout});
+                // Model drag/drop and the card squeeze algorithm consult
+                // mOccupied; restore it from bound children after grid reset.
+                syncWorkspaceOccupancy(cell, loader, "setGridSize_3");
                 try {
                     int[] actual = actualGrid(cell);
                     recordGridState(((android.view.View) cell).getContext(),

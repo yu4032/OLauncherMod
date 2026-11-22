@@ -16,6 +16,16 @@
 8. **迁移与删除**：`DeviceGridState` → `GridSizeMigrationTaskV2`；`LoaderCursor.markDeleted()` → `commitDeleted()`；迁移返回 false 时 `LoaderTask.loadWorkspace()` 调用 `create_empty_db`。
 9. **配置变更**：模块设置界面在保存后强制结束 Launcher 进程；运行中的 Hook 使用一次加载的不可变配置，避免数据库/界面看到两组尺寸。
 
+## 新增：图标放置及挤压路径
+
+`CellLayout.setGridSize(int,int,boolean)` 在源码中直接创建新的 `GridOccupancy(mCountX,mCountY)` 赋给 `mOccupied/mTmpOccupied`，**不会重新遍历已有页面子视图重建占用**。新版本为了扩展 8 列多次调用此方法，构成运行中视图仍存在、空位查询已被重置的不一致。
+
+后续 `CellLayout.findCellForSpan()` → `mOccupied.findVacantCell()`，`CellLayout.isRegionVacant()` → `mOccupied.isRegionVacant()`，`OplusCellLayout.performReorder()` → 以 `mOccupied/mTmpOccupied` 为基础的 `findSequenceReorderSolution()`；这条链会把现有图标位置错误识别成空位，既导致覆盖，也使原生挤压逻辑找不到被挡住的对象。
+
+修正：`WorkspaceOccupancySync.afterGridReset()` 在 `setGridSize` 正常执行之后，依据已绑定的 `ShortcutAndWidgetContainer` 及其网格 LayoutParams 生成占用矩阵，并原子校验新旧网格尺寸后同步 `mOccupied`、`mTmpOccupied`。只在真实工作区执行；拖拽或临时重排期间不重建，以免恢复被主动释放的拖动位置。不取代原生 `performReorder`、文件夹落点判断或 `ModelWriter` 持久化逻辑。
+
+新增 `WorkspaceOccupancyTest` 10 项测试：6→8 列、7/8 列已有图标、跨格小组件、已有碰撞记录、正常空位、边界错误、禁止半写入等。静态实验只证明矩阵恢复算法，不证明设备上每个拖拽变体都已通过。
+
 ## 审计矩阵
 
 | 优先级 | 路径 / 风险 | 处理方式 | 验证层级 |
