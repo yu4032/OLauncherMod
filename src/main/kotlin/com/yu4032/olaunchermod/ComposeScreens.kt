@@ -221,7 +221,12 @@ private fun MarginPage(onBack: () -> Unit) {
     )
 
     LaunchedEffect(Unit) {
-        val raw = RootBridge.read(RootBridge.MARGINS)
+        val raw = RootBridge.readChecked(RootBridge.MARGINS)
+        if (raw == null) {
+            status = "无法以 Root 读取现有配置，已禁止覆盖保存。请先授权后重开设置。"
+            loaded = false
+            return@LaunchedEffect
+        }
         try {
             draft = if (raw.isBlank()) WorkspaceMarginConfig.DEFAULT
                 else WorkspaceMarginConfig.parse(raw)

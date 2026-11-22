@@ -962,48 +962,57 @@ public final class LauncherModule extends XposedModule {
                 if (!isWorkspaceCell(cell) || requestedColumns == 0) {
                     return chain.proceed();
                 }
+                int widthSpec = (Integer) chain.getArgs().get(0);
+                int heightSpec = (Integer) chain.getArgs().get(1);
+                WorkspaceViewportPolicy.Fit fit = null;
+                Context reportContext = null;
+                int rows = 0, top = 0, bottom = 0, incomingHeight = 0;
                 try {
                     ViewGroup workspace = (ViewGroup) getWorkspace.invoke(cell);
-                    if (workspace == null) return chain.proceed();
-                    int rows = integer(cell, "getCountY");
-                    if (rows < 6) return chain.proceed();
-                    int[] axes = effectiveWorkspaceGrid(workspace.getContext(), 0, 0);
-                    if (axes[0] >= axes[1]) return chain.proceed();
-                    int widthSpec = (Integer) chain.getArgs().get(0);
-                    int heightSpec = (Integer) chain.getArgs().get(1);
-                    if (View.MeasureSpec.getMode(heightSpec) != View.MeasureSpec.EXACTLY) {
-                        return chain.proceed();
+                    rows = integer(cell, "getCountY");
+                    if (workspace != null && rows >= 6
+                            && View.MeasureSpec.getMode(heightSpec) == View.MeasureSpec.EXACTLY) {
+                        int[] axes = effectiveWorkspaceGrid(workspace.getContext(), 0, 0);
+                        if (axes[0] < axes[1]) {
+                            Point borders = (Point) borderField.get(cell);
+                            int borderY = borders == null ? 0 : borders.y;
+                            incomingHeight = View.MeasureSpec.getSize(heightSpec);
+                            top = workspace.getPaddingTop();
+                            bottom = workspace.getPaddingBottom();
+                            fit = WorkspaceViewportPolicy.portraitFit(
+                                    incomingHeight, top, bottom, rows, borderY, true);
+                            int storedFixedHeight = fixedHeight.getInt(cell);
+                            if (WorkspaceViewportPolicy.fixedCellOverflows(
+                                    storedFixedHeight, fit.maxCellHeight)) {
+                                // A stale fixed 4-row height prevents the
+                                // 8-row native measurement from recalculating.
+                                fixedHeight.setInt(cell, 0);
+                                fixedWidth.setInt(cell, 0);
+                            }
+                            reportContext = workspace.getContext();
+                        }
                     }
-                    Point borders = (Point) borderField.get(cell);
-                    int borderY = borders == null ? 0 : borders.y;
-                    int originalHeight = View.MeasureSpec.getSize(heightSpec);
-                    WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
-                            originalHeight, workspace.getPaddingTop(),
-                            workspace.getPaddingBottom(), rows, borderY, true);
-                    int storedFixedHeight = fixedHeight.getInt(cell);
-                    if (WorkspaceViewportPolicy.fixedCellOverflows(
-                            storedFixedHeight, fit.maxCellHeight)) {
-                        // Native CellLayout.onMeasure skips recalculation when
-                        // both fixed-cell dimensions are nonzero. Release its
-                        // outdated fixed dimensions only for an oversized grid.
-                        fixedHeight.setInt(cell, 0);
-                        fixedWidth.setInt(cell, 0);
-                    }
-                    Object result = fit.reduced
-                            ? chain.proceed(new Object[]{widthSpec,
-                                    View.MeasureSpec.makeMeasureSpec(
-                                            fit.childHeight, View.MeasureSpec.EXACTLY)})
-                            : chain.proceed();
-                    if (fit.reduced) {
-                        recordViewportState(workspace.getContext(), originalHeight,
-                                fit.childHeight, rows, workspace.getPaddingTop(),
-                                workspace.getPaddingBottom(), integer(cell, "getCellHeight"));
-                    }
-                    return result;
                 } catch (Throwable error) {
-                    log(Log.ERROR, TAG, "workspace viewport fit failed: " + error);
-                    return chain.proceed();
+                    log(Log.ERROR, TAG, "workspace viewport preparation failed: " + error);
+                    fit = null;
                 }
+                // Proceed exactly once, even if native measure or reporting throws.
+                boolean reduced = fit != null && fit.reduced;
+                Object result = reduced
+                        ? chain.proceed(new Object[]{widthSpec,
+                                View.MeasureSpec.makeMeasureSpec(
+                                        fit.childHeight, View.MeasureSpec.EXACTLY)})
+                        : chain.proceed();
+                if (reduced && reportContext != null) {
+                    try {
+                        recordViewportState(reportContext, incomingHeight,
+                                fit.childHeight, rows, top, bottom,
+                                integer(cell, "getCellHeight"));
+                    } catch (Throwable error) {
+                        log(Log.WARN, TAG, "workspace viewport report failed: " + error);
+                    }
+                }
+                return result;
             });
             log(Log.INFO, TAG, "17.5.5 workspace portrait viewport-fit installed");
         } catch (Throwable error) {

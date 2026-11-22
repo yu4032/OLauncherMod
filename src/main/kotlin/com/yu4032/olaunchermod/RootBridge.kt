@@ -25,9 +25,15 @@ internal object RootBridge {
         }
     }
 
-    suspend fun read(path: String): String = withContext(Dispatchers.IO) {
-        execute("cat '$path' 2>/dev/null").let { if (it.ok) it.text else "" }
+    /** Null means Root failed; empty means a missing (valid) config file. */
+    suspend fun readChecked(path: String): String? = withContext(Dispatchers.IO) {
+        val uid = execute("id -u")
+        if (!uid.ok || uid.text != "0") return@withContext null
+        val result = execute("if [ -f '$path' ]; then cat '$path'; fi")
+        if (result.ok) result.text else null
     }
+
+    suspend fun read(path: String): String = readChecked(path).orEmpty()
 
     suspend fun saveGrid(columns: Int, rows: Int, keepEmpty: Boolean): Boolean =
         withContext(Dispatchers.IO) {
