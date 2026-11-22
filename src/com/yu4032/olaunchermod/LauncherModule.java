@@ -335,8 +335,10 @@ public final class LauncherModule extends XposedModule {
     }
 
     private synchronized void recordMarginState(Context context,
-            WorkspaceMarginConfig margins, int[] original, int[] actual) {
-        String value = "configured_dp=" + margins.serialize() + "\n"
+            WorkspaceMarginConfig margins, int[] original, int[] actual,
+            boolean isPortrait) {
+        String value = "orientation=" + (isPortrait ? "portrait" : "landscape") + "\n"
+                + "configured_dp=" + margins.serialize() + "\n"
                 + "native_padding_px=" + java.util.Arrays.toString(original) + "\n"
                 + "actual_padding_px=" + java.util.Arrays.toString(actual) + "\n";
         if (value.equals(lastMarginReport)) return;
@@ -878,12 +880,20 @@ public final class LauncherModule extends XposedModule {
                                 view.getResources().getDisplayMetrics();
                         int width = view.getWidth() > 0 ? view.getWidth() : metrics.widthPixels;
                         int height = view.getHeight() > 0 ? view.getHeight() : metrics.heightPixels;
-                        int[] adjusted = margins.adjust(original, metrics.density, width, height);
+                        // Use the same physical-display orientation source as
+                        // the 17.5.5 IDP/Loader grid fix. Settings remain
+                        // landscape/portrait-specific, not rotated numerically.
+                        int[] axes = GridOrientation.current(view.getContext(),
+                                8, 4, 8, 4);
+                        boolean isPortrait = axes[0] == 4;
+                        int[] adjusted = margins.adjust(original, metrics.density,
+                                width, height, isPortrait);
                         if (!java.util.Arrays.equals(original, adjusted)) {
                             view.setPadding(adjusted[0], adjusted[1],
                                     adjusted[2], adjusted[3]);
                         }
-                        recordMarginState(view.getContext(), margins, original, adjusted);
+                        recordMarginState(view.getContext(), margins, original,
+                                adjusted, isPortrait);
                     } catch (Throwable error) {
                         log(Log.ERROR, TAG, "workspace margin application failed: " + error);
                     }

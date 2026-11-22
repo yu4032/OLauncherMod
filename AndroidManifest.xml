@@ -9,6 +9,11 @@
         <meta-data android:name="xposedminversion" android:value="93" />
 
         <activity
+            android:name=".MarginSettingsActivity"
+            android:exported="false"
+            android:label="工作区位置" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="OLauncherMod">

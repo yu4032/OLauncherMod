@@ -49,19 +49,17 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
 
-## 工作区位置与边距自定义（ColorOS 17.5.5）
+## 工作区位置与边距（参考 LiquidDock 设置交互）
 
-新增四侧独立调节：**左 / 上 / 右 / 下**，单位 dp，可输入 **-160～160** 的带符号整数。数值是在原生 Workspace padding 上的*增量*；全 0 完全保留系统默认几何。正数增加该侧留白、负数减少；例如 `左 +20，右 -20` 会将工作区向右移动约 20 dp（如果右边原始留白足够），而不改变网格行列或图标数据库坐标。
+参考 [LiquidDock 源码](https://github.com/yu4032/LiquidDock/blob/main/src/main/kotlin/com/hellovoid/liquiddock/DeclaredSettingsPages.kt)：布局页区分**横屏 / 竖屏**，每个方向独立的三个参数分别是**水平距离偏移、顶部距离偏移、底部距离偏移**。水平偏移同时叠加左右两侧的留白，不再要求逐个填写左/右的文本框。设置操作采用 LiquidDock `IntSetting` 的交互结构：**滑块 + 可点的 dp 数值 + 数值输入对话框 + ±1 dp 微调 + 单项重置**，并提供当前方向和全部重置。
 
-设置页新增独立的「应用边距并重启桌面」和「恢复系统默认边距」入口；边距配置存于 `/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins`，格式为 `left top right bottom`，**不与旧版 `launcher_grid` 混用**。调整不会触发网格迁移或自动重排，也不会修改文件夹、Hotseat、所有应用和小组件面板本身的边距。工作区旋转时会沿当前物理方向重新应用相同的四侧 dp 增量。
+参数单位 **dp**，范围与 LiquidDock 网格距离参数一致，均为 **-600～600**；全部 0 时不改变原生 Workspace 几何。修改参数后**点击「应用边距并重启桌面」才写入配置**，避免在网格加载与拖拽中途更新。系统原生 Workspace padding 与当前物理方向仍是布局计算的唯一基准，不替换 IDP 和模型加载边界，不改图标坐标或小组件跨度。
 
-### 实现链路
+配置路径仍为 `launcher_workspace_margins`，新格式为 **横屏水平/上/下，竖屏水平/上/下**（共六个整数）。兼容上一版的四参数 `left top right bottom` 文件：若未编辑，完全按旧四边值执行；首次修改采用新版对称水平距离，旧左右不对称的情况需要用户明确确认。上下与水平增量裁剪后单侧不为负，且至少保留视口 28% 的轴向空间。
 
-直接核实用户提供的 `OplusLauncher-17.5.5.apk`：`Workspace.setInsets(Rect)`（`classes.dex PC 0x000e`）读取 `DeviceProfile.mWorkspaceParam` 的 `l5c.h():Rect`，在 `0x001a` 调用 `View.setPadding(left, top, right, bottom)`，之后才继续设置分页间距并更新页/小组件大小。该原生 Padding 方法同时被 WidgetSheet 使用，因此模块**不 Hook 共享的 `l5c.h()`**；只在 `Workspace.setInsets` 执行完之后，对真正的 `Workspace` View 追加边距。这一层控制分页布局及拖拽坐标使用的 View Padding，而不是通过 `translationX/Y` 制造视觉与命中区域不一致。
+此功能以 17.5.5 的 `Workspace.setInsets(Rect)` 为 Hook 位置。原生方法先取得 DeviceProfile 的 Workspace Padding，再更新页间距/子布局；模块只调整**Workspace 本身的真实 Padding**，不 Hook 其他组件共用的 `l5c.h()`，不修改 Hotseat、文件夹及小组件选择面板。横竖屏分别叠加当前方向参数，配置不会在重复 `setInsets` 时累计。
 
-每次 `setInsets` 都以原生 padding 作为基准，不累加旧值。正边距总和最高约占可用视口对应轴的 72%，防止 8×4/4×8 网格被极端设置压缩到不可操作。会生成只读诊断 `launcher_margin_status`，包括配置的 dp 增量、原生 padding(px) 和实际 padding(px)。
-
-**验收建议**：先从 `左 12 / 上 12 / 右 0 / 下 0` 进行轻量测试，检查图标实际偏移、水平换页、拖拽放置、Hotseat 是否保持原位，再旋转到竖屏核验。当前仅证明 17.5.5 相关 Hook 入口和配置逻辑成立，最终效果需要真机验收。
+详细设计：[docs/WORKSPACE_MARGINS_1755.md](docs/WORKSPACE_MARGINS_1755.md)。**页面指示器 Y 在 LiquidDock 中是独立设置，这次尚未移植。**
 
 ## 修复 17.5.5 竖屏仍保持 8×4（显示方向与模型边界）
 

@@ -1,66 +1,124 @@
 package com.yu4032.olaunchermod;
 
+import java.util.Arrays;
+
 /**
- * Additional Workspace padding, in dp. Never changes icon cell coordinates,
- * profile grid dimensions, or the Launcher database.
+ * Workspace padding adjustments in dp. The six canonical values match
+ * LiquidDock's per-orientation {horizontal, top, bottom} layout controls.
+ * Landscape/portrait are independent and do NOT rotate margin settings.
  *
- * File format: left top right bottom (signed integers, -160..160).
- * Zero is an exact no-op that preserves ColorOS's native padding.
+ * The old 4-value left/top/right/bottom format is accepted unchanged until
+ * the first explicit save from the new UI. Unequal legacy left/right values
+ * are reported for user-approved migration, not silently overwritten.
  */
 final class WorkspaceMarginConfig {
-    static final int LIMIT_DP = 160;
+    static final int LIMIT_DP = 600;
+    static final int HORIZONTAL = 0, TOP = 1, BOTTOM = 2;
     static final WorkspaceMarginConfig DEFAULT =
-            new WorkspaceMarginConfig(0, 0, 0, 0);
+            new WorkspaceMarginConfig(new int[3], new int[3], null);
 
-    final int leftDp;
-    final int topDp;
-    final int rightDp;
-    final int bottomDp;
+    private final int[] landscape;
+    private final int[] portrait;
+    private final int[] legacyEdges; // {left,top,right,bottom} or null
 
-    private WorkspaceMarginConfig(int left, int top, int right, int bottom) {
-        leftDp = left;
-        topDp = top;
-        rightDp = right;
-        bottomDp = bottom;
+    private WorkspaceMarginConfig(int[] landscape, int[] portrait, int[] legacyEdges) {
+        this.landscape = landscape.clone();
+        this.portrait = portrait.clone();
+        this.legacyEdges = legacyEdges == null ? null : legacyEdges.clone();
     }
 
     static WorkspaceMarginConfig parse(String text) {
-        if (text == null) throw new IllegalArgumentException("missing margin settings");
-        String[] values = text.trim().split("\\s+");
-        if (values.length != 4) {
-            throw new IllegalArgumentException("expected left top right bottom");
+        if (text == null || text.trim().isEmpty()) {
+            throw new IllegalArgumentException("missing margin settings");
         }
-        int[] dp = new int[4];
-        for (int i = 0; i < dp.length; i++) {
-            dp[i] = Integer.parseInt(values[i]);
-            if (dp[i] < -LIMIT_DP || dp[i] > LIMIT_DP) {
-                throw new IllegalArgumentException("margin outside -160..160 dp");
+        String[] values = text.trim().split("\\s+");
+        if (values.length != 4 && values.length != 6) {
+            throw new IllegalArgumentException("expected 4 (legacy) or 6 values");
+        }
+        int[] numbers = new int[values.length];
+        for (int i = 0; i < numbers.length; i++) {
+            numbers[i] = Integer.parseInt(values[i]);
+            if (numbers[i] < -LIMIT_DP || numbers[i] > LIMIT_DP) {
+                throw new IllegalArgumentException("margin outside -600..600 dp");
             }
         }
-        return new WorkspaceMarginConfig(dp[0], dp[1], dp[2], dp[3]);
+        if (numbers.length == 6) {
+            return new WorkspaceMarginConfig(
+                    Arrays.copyOfRange(numbers, 0, 3),
+                    Arrays.copyOfRange(numbers, 3, 6), null);
+        }
+        int horizontal = Math.round((numbers[0] + numbers[2]) / 2f);
+        int[] current = {horizontal, numbers[1], numbers[3]};
+        return new WorkspaceMarginConfig(current, current, numbers);
     }
 
     String serialize() {
-        return leftDp + " " + topDp + " " + rightDp + " " + bottomDp;
+        if (legacyEdges != null) return join(legacyEdges);
+        return join(landscape) + " " + join(portrait);
+    }
+
+    private static String join(int[] values) {
+        StringBuilder result = new StringBuilder();
+        for (int value : values) {
+            if (result.length() > 0) result.append(' ');
+            result.append(value);
+        }
+        return result.toString();
+    }
+
+    int get(boolean portraitMode, int axis) {
+        if (axis < HORIZONTAL || axis > BOTTOM) throw new IllegalArgumentException("axis");
+        return (portraitMode ? portrait : landscape)[axis];
+    }
+
+    boolean isLegacy() { return legacyEdges != null; }
+
+    boolean isLegacyAsymmetric() {
+        return legacyEdges != null && legacyEdges[0] != legacyEdges[2];
+    }
+
+    WorkspaceMarginConfig with(boolean portraitMode, int axis, int value) {
+        if (axis < HORIZONTAL || axis > BOTTOM || value < -LIMIT_DP || value > LIMIT_DP) {
+            throw new IllegalArgumentException("invalid margin setting");
+        }
+        int[] nextL = landscape.clone();
+        int[] nextP = portrait.clone();
+        (portraitMode ? nextP : nextL)[axis] = value;
+        return new WorkspaceMarginConfig(nextL, nextP, null);
+    }
+
+    WorkspaceMarginConfig resetOrientation(boolean portraitMode) {
+        return new WorkspaceMarginConfig(
+                portraitMode ? landscape : new int[3],
+                portraitMode ? new int[3] : portrait, null);
     }
 
     boolean isDefault() {
-        return leftDp == 0 && topDp == 0 && rightDp == 0 && bottomDp == 0;
+        if (legacyEdges != null) {
+            for (int n : legacyEdges) if (n != 0) return false;
+            return true;
+        }
+        for (int n : landscape) if (n != 0) return false;
+        for (int n : portrait) if (n != 0) return false;
+        return true;
     }
 
-    /**
-     * Apply signed deltas to native Workspace padding. Keep at least 28% of
-     * the viewport available on either axis even for extreme user values.
-     * Does not mutate the native padding array.
-     */
-    int[] adjust(int[] nativePx, float density, int widthPx, int heightPx) {
+    int[] adjust(int[] nativePx, float density, int widthPx, int heightPx,
+            boolean portraitMode) {
         if (nativePx == null || nativePx.length != 4) {
             throw new IllegalArgumentException("expected four native paddings");
         }
         int[] result = nativePx.clone();
         if (isDefault()) return result;
         if (!(density > 0)) density = 1f;
-        final int[] dp = {leftDp, topDp, rightDp, bottomDp};
+        final int[] dp;
+        if (legacyEdges != null) {
+            dp = legacyEdges;
+        } else {
+            int[] axes = portraitMode ? portrait : landscape;
+            dp = new int[]{axes[HORIZONTAL], axes[TOP],
+                    axes[HORIZONTAL], axes[BOTTOM]};
+        }
         for (int i = 0; i < result.length; i++) {
             long candidate = (long) nativePx[i] + Math.round(dp[i] * density);
             result[i] = (int) Math.max(0L, Math.min(candidate, Integer.MAX_VALUE));

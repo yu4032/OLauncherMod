@@ -1,46 +1,57 @@
-# Workspace 边距独立配置（17.5.5）
+# 工作区位置自定义：LiquidDock 风格设置（17.5.5）
 
-## 原生调用链验证
+## 基于 LiquidDock 原始实现的设计
 
-归档实包：`OplusLauncher-17.5.5.apk` `classes.dex`。
+来自用户的 `yu4032/LiquidDock` 仓库，按当期 `main` 源码核实：
+
+- `DeclaredSettingsPages.kt`：`Page.GridLandscape`、`Page.GridPortrait` 两页；各有“工作区位置”区段，与独立“页面指示器”区段。
+- `SettingsOptionSpecs.kt`：每个方向独立的 `horizontal_distance` / `top_distance` / `bottom_distance`，水平参数描述为“同时调整左右两侧的水平距离”。
+- `ConfigSchema.Grid`：这六项默认 0dp，范围 -600..600dp。
+- `SettingsControls.IntSetting`：滑块，数值标签点击唤起精确输入，重置按钮，以及 ± 步进；滑动期间使用量化显示，避免无意义的反复写入。
+- LiquidDock 使用 Jetpack Compose / MIUIX。OLauncherMod 当前为小体积纯 Java/LSPosed 模块，因此**实现同等交互而不引入整套 Compose/MIUIX**，并保留现有“保存后重启桌面”的安全约束。
+
+## 配置格式与语义
+
+文件 `/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins`。
+
+**新格式**，共六个带符号整数，范围 -600..600dp：
+
+```text
+landscape_horizontal landscape_top landscape_bottom portrait_horizontal portrait_top portrait_bottom
+20 -5 12 -10 15 5
+```
+
+- 横屏、竖屏的六个值分别独立。旋转仅**切换选用参数组**，不会把上边距变成左边距。
+- 对当前方向的 `horizontal` 叠加左右原生 Padding，`top` 叠加顶部 Padding，`bottom` 叠加底部 Padding。0 即完全使用对应的系统原生值。
+- 为防止异常值挤压图标，计算后的 Padding 最小为 0；若相对两侧的和超过轴向视口 72%，进行比例缩减。
+- 参数变更只写入 Workspace 的 view Padding，不更改 `singledesktopitems`、网格行列、Loader 边界、Widget span 或文件夹/Hotseat Padding。
+- 生效需要点击应用并重启桌面。滑块在设置页只改变本地草稿，避免影响进行中的拖拽或加载。
+
+**旧版兼容**：四值 `left top right bottom` 仍可解析；在用户未明确编辑并保存新版六值前，保留原始四值含义及原文件格式。编辑时两屏的水平初值取旧左右值平均数；当旧左右不等时，保存前出现确认对话框，避免静默丢失不对称设置。
+
+## 原生 17.5.5 布局入口
 
 ```text
 OplusWorkspace.setWindowInsets(Rect)
   -> Workspace.setInsets(Rect)
-       -> BaseActivity.mDeviceProfile
-       -> DeviceProfile.mWorkspaceParam  [l5c]
-       -> l5c.h(): Rect                 [DEX 0x000e]
-       -> View.setPadding(L,T,R,B)     [DEX 0x001a]
-       -> PagedView.mInsets.set(Rect)
-       -> PagedView.setPageSpacing(...)
-       -> updateCellLayoutPadding()
-       -> updateWorkspaceWidgetsSizes()
+       -> DeviceProfile.mWorkspaceParam / l5c.h(): Rect
+       -> View.setPadding(L,T,R,B)
+       -> page spacing / cell layout padding / widget size update
+  -> OLauncherMod appends orientation-specific dp delta
+       -> Workspace.setPadding(adjusted L,T,R,B)
 ```
 
-`l5c.h()` 另外被 `Workspace.setWorkspacePivotY()`、`BaseWidgetSheet.doMeasure()`、`OplusWidgetsFullSheet.onMeasure()` 等调用。直接 Hook 返回值会扩散到小组件面板的测量，不符合仅调整工作区位置的目标。因此 Hook `Workspace.setInsets(Rect)`：先执行原生布局更新，再对 `Workspace` 的 Padding 叠加用户四侧 delta。
+没有修改原生 Padding 提供者 `l5c.h()`，因此不会扩散到 WidgetSheet 等其他调用者。旋转依赖先前统一的物理显示器方向判定。
 
-## 配置
-
-工作区共享目录 `launcher_workspace_margins`，一行四个带符号整数：
-
-```text
-left top right bottom
-20 8 -20 0
-```
-
-默认 `0 0 0 0`。范围各 `-160..160` dp，向上/向左可通过对应负值缩小原生留白。因 Android View 不支持负 padding，每侧最小为 0px；当左右或上下额外边距过大时进行比例限制，至少保留轴向视口 28% 的可用空间。请注意小屏设备上的实际偏移可能因此小于输入的 dp 数。
-
-- 与 `launcher_grid` 完全独立，不触发 DB 迁移、Loader 删除或坐标 UPDATE。
-- 只改变真实 `Workspace` 的 Padding，不对 `OplusCellLayout` 进行 `setTranslation`；使页面几何和拖拽坐标基于同一 View 布局。
-- 原生每次 `setInsets` 会重设基础 Padding，Hook 不会重复累计配置；横屏/竖屏均按真实系统各自的基础 Padding 追加同一组数值。
-- 在设置页保存后主动重启桌面进程，避免正在拖动图标时变更网格和边距。
-- 诊断文件 `launcher_margin_status` 由 Launcher 自己的 external files 目录写入。内容包括 dp 值、native/actual padding。
+诊断文件 `launcher_margin_status` 记录 `orientation`、`configured_dp`、`native_padding_px`、`actual_padding_px`。日志值是原生更新结束后的实际 Padding；不能拿它作为行列数或模型坐标的替代证据。
 
 ## 验收
 
-1. 边距默认 0：确认与此前已验证的 8×4 横屏、4×8 竖屏完全一致。
-2. 左 +20、右 -20：观察工作区整体右移（如果 native 右侧留白不足，右值会裁至 0），Hotseat 不移动。
-3. 上 +20、下 -20：观察工作区竖直位置和图标触摸区域一致。
-4. 在两种方向测试切页、长按拖动、卡片/小组件横跨格子；边距只影响显示几何，不得修改数据表 `singledesktopitems`。
-5. 读 `launcher_margin_status` 查看实际 Padding，确认首次启动与旋转后的结果并没有在每次调用中重复叠加。
+1. 首先保存 `0 0 0 0 0 0`，确认横屏 8×4、竖屏 4×8 没有任何可见变动。
+2. 横屏设置 `horizontal=20`，竖屏保持 0：横屏左右留白增加，旋转到竖屏后恢复原始留白。
+3. 横屏顶部 +20、底部 -20：观察工作区纵向分布变化并测试触摸/拖拽命中，不改变 Hotseat。
+4. 分别测试数值点击输入、滑块、±1dp、单项重置及重置当前方向；只有点击应用才改写文件。
+5. 再用旧 `20 8 -10 0` 文件验证：读入前后的执行结果相同，触发用户编辑时才执行带确认的旧参数迁移。
+6. 旋转后检查 `launcher_margin_status` 的 orientation 和 native/actual padding，测试切页、图标放置、跨格小组件/卡片是否仍可操作。
 
+**暂未实现**：LiquidDock 中独立的页面指示器位置项，不应误描述成此 PR 的已有功能。工作区位置/边距真机效果尚待验收。
