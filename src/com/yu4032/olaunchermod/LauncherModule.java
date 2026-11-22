@@ -272,11 +272,10 @@ public final class LauncherModule extends XposedModule {
     }
 
     /**
-     * A hard failure is justified only for the TWO methods responsible for
-     * displaying the actual workspace grid. All loader, rotation, arrangement
-     * and migration symbols are OPTIONAL capabilities: their hooks are resolved
-     * in independent try/catch blocks below. Requiring them all here caused
-     * debug-6 to skip even the previously working 8x4 workspace hooks.
+     * Diagnostics only. Core workspace methods are checked as a group for
+     * visibility, but installation happens independently below. A missing
+     * entry cannot suppress other valid bindings: that global early-return
+     * is what regressed debug-6 from a working 8x4 workspace to stock 6x4.
      */
     private boolean preflightVisualGridSymbols(ClassLoader loader) {
         try {
@@ -289,8 +288,8 @@ public final class LauncherModule extends XposedModule {
                     + "installing workspace hooks independently of optional symbols");
             return true;
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "essential workspace methods unavailable; "
-                    + "no custom grid hooks installed: " + error);
+            log(Log.WARN, TAG, "visual grid symbol probe incomplete; "
+                    + "attempting individually resolved hooks: " + error);
             return false;
         }
     }
@@ -300,7 +299,9 @@ public final class LauncherModule extends XposedModule {
         if (!"com.android.launcher".equals(param.getPackageName())) return;
         ClassLoader loader = param.getDefaultClassLoader();
         refresh();
-        if (requestedColumns > 0 && !preflightVisualGridSymbols(loader)) return;
+        // Diagnostics only: each hook below resolves and fails independently.
+        // The previous global early-return disabled a working workspace grid.
+        if (requestedColumns > 0) preflightVisualGridSymbols(loader);
 
         try {
             Class<?> idp = Class.forName(

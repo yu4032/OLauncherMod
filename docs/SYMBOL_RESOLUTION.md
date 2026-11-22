@@ -11,7 +11,7 @@ OLauncherMod 使用 LSPosed API 102 对 `java.lang.reflect.Method` 和 `Construc
 3. **字段符号校验**：同样检查名称、类型、static 属性；只有唯一类型匹配时可回退。
 4. **绝不按声明顺序、内存地址、dex method index 或字段偏移选取**。
 5. **歧义直接失败**：不得为找到一个“能 Hook 的方法”就选择第一个候选。
-6. **按功能域分级预检查（debug-6 回归修复）**：只对 IDP 列行设置和 `OplusCellLayout.setGridSize(int,int)` 这两个最小核心入口执行硬门槛检查。`OplusLoaderCursor`、旋转缓存和排列模式是各自独立的功能域，若解析失败只禁止该域对应的 Hook、保留详细错误日志，**不再全局终止工作区网格初始化**。这避免了一处可选签名变化把原本可用的 8×4 退回 6×4；但未安装的辅助 Hook 仍可能导致重启后数据问题，因此不把此改动当作持久化修复。
+6. **按 Hook 独立安装（debug-6 回归修复）**：启动时检测 IDP 与工作区入口仅用于诊断，不再设置任何全局早退门槛。工作区、`OplusLoaderCursor`、旋转缓存与排列模式在独立 `try/catch` 中解析并安装；某个签名改变只禁用对应功能，**不会撤销其他已经可以解析的 Hook**。这样避免单个可选签名变化把可用的 8×4 退回 6×4；但辅助 Hook 缺失仍可能导致重启后图标数据不一致，因此本改动不是持久化修复。
 
 ## 关键符号
 
@@ -45,7 +45,7 @@ CI 运行 `gradle testDebugUnitTest assembleDebug`。在安装设备上检查 `O
 
 - `visual grid symbols verified`：核心工作区签名成功通过预检查；
 - `resolved model loader boundary symbol`：最终绑定的真实类及方法名；
-- `essential workspace methods unavailable; no custom grid hooks installed`：工作区核心入口不兼容，完全停用自定义网格；
+- `visual grid symbol probe incomplete; attempting individually resolved hooks`：核心检测不完整，但不会再全局停止，每个 Hook 单独解析；
 - `... hook failed`：具体可选功能的独立安装失败，不再连带取消已经可用的工作区 Hook。
 
 即使所有符号解析成功，也仍需检查重启前后数据库 `DELETE/UPDATE` 与实际工作区是否一致，不能把“找到方法”当作“逻辑等价”。
