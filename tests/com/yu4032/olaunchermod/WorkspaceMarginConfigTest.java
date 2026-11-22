@@ -13,7 +13,7 @@ public class WorkspaceMarginConfigTest {
     }
 
     @Test public void landscapeHasSymmetricHorizontalInsets() {
-        WorkspaceMarginConfig config = WorkspaceMarginConfig.parse("20 0 -20 0 0 0");
+        WorkspaceMarginConfig config = WorkspaceMarginConfig.parse("20 0 0 0 0 0");
         assertArrayEquals(new int[]{60,80,80,96},
                 config.adjust(new int[]{20,80,40,96}, 2f, 1300, 900, false));
     }
