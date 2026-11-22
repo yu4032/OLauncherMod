@@ -1,6 +1,6 @@
 # OLauncherMod
 
-ColorOS 桌面的 LSPosed 模块（Xposed Module API 102，纯 Java）：修改 Workspace 网格，并按新网格重排图标坐标。
+开发中
 
 - 目标应用：`com.android.launcher`（ColorOS 17.3.9）
 - minSdk 29 / targetSdk 36
