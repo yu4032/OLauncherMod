@@ -21,10 +21,16 @@ public final class MainActivity extends Activity {
     private static final String DIR =
             "/storage/emulated/0/Android/data/com.android.launcher/files";
     private static final String GRID = DIR + "/launcher_grid";
+    private static final String MARGINS = DIR + "/launcher_workspace_margins";
 
     private EditText columnsInput;
     private EditText rowsInput;
     private CheckBox keepEmpty;
+    private EditText leftMarginInput;
+    private EditText topMarginInput;
+    private EditText rightMarginInput;
+    private EditText bottomMarginInput;
+    private TextView marginStatus;
     private TextView status;
     private TextView runtimeStatus;
 
@@ -69,8 +75,54 @@ public final class MainActivity extends Activity {
         root.addView(apply);
 
         status = new TextView(this);
-        status.setPadding(0, pad / 2, 0, 0);
+        status.setPadding(0, pad / 2, 0, pad);
         root.addView(status);
+
+        TextView marginsTitle = new TextView(this);
+        marginsTitle.setText("工作区位置与边距");
+        marginsTitle.setTextSize(18);
+        root.addView(marginsTitle);
+
+        TextView marginsHint = new TextView(this);
+        marginsHint.setText("在系统原生边距基础上增减，单位 dp（-160～160）。"
+                + "正数增加留白，负数缩小留白。"
+                + "左侧增加会把图标推向右侧；上侧增加会把图标推向下方，"
+                + "右、下两侧同理。"
+                + "同时调整相对两侧，可移动工作区而尽量保持可用面积。"
+                + "横竖屏均按各自物理方向应用，不修改图标坐标。"
+                + "全部为 0 时完全使用系统原始布局。");
+        marginsHint.setTextSize(12);
+        marginsHint.setPadding(0, pad / 2, 0, pad / 2);
+        root.addView(marginsHint);
+
+        leftMarginInput = signedNumberInput();
+        topMarginInput = signedNumberInput();
+        rightMarginInput = signedNumberInput();
+        bottomMarginInput = signedNumberInput();
+        root.addView(inputRow("左 (dp)", leftMarginInput));
+        root.addView(inputRow("上 (dp)", topMarginInput));
+        root.addView(inputRow("右 (dp)", rightMarginInput));
+        root.addView(inputRow("下 (dp)", bottomMarginInput));
+
+        Button applyMargins = new Button(this);
+        applyMargins.setText("应用边距并重启桌面");
+        applyMargins.setOnClickListener(view -> applyMargins());
+        root.addView(applyMargins);
+
+        Button resetMargins = new Button(this);
+        resetMargins.setText("恢复系统默认边距");
+        resetMargins.setOnClickListener(view -> {
+            leftMarginInput.setText("0");
+            topMarginInput.setText("0");
+            rightMarginInput.setText("0");
+            bottomMarginInput.setText("0");
+            applyMargins();
+        });
+        root.addView(resetMargins);
+
+        marginStatus = new TextView(this);
+        marginStatus.setPadding(0, pad / 2, 0, pad);
+        root.addView(marginStatus);
 
         Button refresh = new Button(this);
         refresh.setText("刷新工作区实际网格");
@@ -85,6 +137,7 @@ public final class MainActivity extends Activity {
 
         setContentView(scroll);
         loadCurrent();
+        loadMarginCurrent();
         loadRuntimeStatus();
     }
 
@@ -95,6 +148,12 @@ public final class MainActivity extends Activity {
         return input;
     }
 
+    private EditText signedNumberInput() {
+        EditText input = numberInput();
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        return input;
+    }
+
     private LinearLayout inputRow(String label, EditText input) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -102,7 +161,7 @@ public final class MainActivity extends Activity {
         TextView text = new TextView(this);
         text.setText(label);
         text.setTextSize(14);
-        text.setWidth((int) (48 * getResources().getDisplayMetrics().density));
+        text.setWidth((int) (76 * getResources().getDisplayMetrics().density));
         row.addView(text);
         row.addView(input, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -166,17 +225,71 @@ public final class MainActivity extends Activity {
                 + "/launcher_grid_status 2>/dev/null");
         String loaderContent = runRootRead("cat " + DIR
                 + "/launcher_loader_status 2>/dev/null");
+        String marginContent = runRootRead("cat " + DIR
+                + "/launcher_margin_status 2>/dev/null");
         String workspaceReport = content.isEmpty()
                 ? "尚无工作区报告：请确认 LSPosed 作用域后重启桌面。"
                 : content;
         String loaderReport = loaderContent.isEmpty()
-                ? "尚无加载器边界报告：说明 j5.i.I 尚未调用，"
+                ? "尚无加载器边界报告：说明 yn9.v 尚未调用，"
                     + "或最终边界 Hook 未安装。检查 LSPosed 日志。"
                 : loaderContent;
         runtimeStatus.setText("工作区实际网格：\n" + workspaceReport
                 + "\n启动加载器边界：\n" + loaderReport
-                + "\n两项都应显示横屏 8x4（竖屏工作区会转置）。"
-                + "若图标仍丢失，请提供此报告和 OLauncherMod 日志。");
+                + "\n横屏应为 8x4，竖屏应为 4x8。"
+                + "\n工作区边距：\n"
+                + (marginContent.isEmpty() ? "当前使用默认边距，或尚无运行状态报告。" : marginContent)
+                + "\n如果出现布局偏移异常，请同时提供本报告。");
+    }
+
+    private void loadMarginCurrent() {
+        String value = runRootRead("cat " + MARGINS + " 2>/dev/null");
+        WorkspaceMarginConfig config;
+        try {
+            config = value.isEmpty() ? WorkspaceMarginConfig.DEFAULT
+                    : WorkspaceMarginConfig.parse(value);
+        } catch (IllegalArgumentException error) {
+            config = WorkspaceMarginConfig.DEFAULT;
+            marginStatus.setText("边距文件无效，显示系统默认值。请重新保存。");
+        }
+        leftMarginInput.setText(Integer.toString(config.leftDp));
+        topMarginInput.setText(Integer.toString(config.topDp));
+        rightMarginInput.setText(Integer.toString(config.rightDp));
+        bottomMarginInput.setText(Integer.toString(config.bottomDp));
+        if (marginStatus.getText().length() == 0) {
+            marginStatus.setText(config.isDefault()
+                    ? "当前：系统默认边距"
+                    : "当前边距增量：" + config.serialize() + " dp（左 上 右 下）");
+        }
+    }
+
+    private void applyMargins() {
+        WorkspaceMarginConfig config;
+        try {
+            String line = leftMarginInput.getText().toString().trim() + " "
+                    + topMarginInput.getText().toString().trim() + " "
+                    + rightMarginInput.getText().toString().trim() + " "
+                    + bottomMarginInput.getText().toString().trim();
+            config = WorkspaceMarginConfig.parse(line);
+        } catch (IllegalArgumentException error) {
+            Toast.makeText(this, "四个边距都必须在 -160～160 dp 之间",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        boolean saved = runRootCommand("mkdir -p " + DIR
+                + " && printf '%s\\n' '" + config.serialize() + "' > " + MARGINS
+                + " && chmod 644 " + MARGINS
+                + " && rm -f " + DIR + "/launcher_margin_status"
+                + " && am force-stop com.android.launcher");
+        if (saved) {
+            marginStatus.setText(config.isDefault()
+                    ? "已恢复系统默认边距，桌面正在重新启动。"
+                    : "已保存边距：" + config.serialize()
+                      + " dp，桌面正在重新启动。");
+            Toast.makeText(this, "边距已保存", Toast.LENGTH_SHORT).show();
+        } else {
+            marginStatus.setText("保存失败，请检查 Root 授权。");
+        }
     }
 
     private void applyGrid() {

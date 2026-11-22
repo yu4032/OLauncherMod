@@ -4,7 +4,9 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.graphics.Rect;
 import android.util.Log;
+import android.view.View;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -25,10 +27,14 @@ public final class LauncherModule extends XposedModule {
     private static final String CONFIG_FILE =
             "/storage/emulated/0/Android/data/com.android.launcher/files/launcher_grid";
     private static final String OPLUS_PREFS = "com.android.launcher_unique_shared_prefs";
+    private static final String MARGINS_FILE =
+            "/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins";
 
     private volatile int requestedColumns;
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
+    private volatile WorkspaceMarginConfig workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+    private volatile String lastMarginReport = "";
     // A layout change requires a fresh Launcher process, never a mid-drag
     // configuration swap between live views, loader and database.
     private boolean configInitialized;
@@ -41,6 +47,18 @@ public final class LauncherModule extends XposedModule {
     private synchronized void refresh() {
         if (configInitialized) return;
         configInitialized = true;
+        // Independent of launcher_grid: users may adjust native margins
+        // without enabling a custom grid.
+        try (BufferedReader margins = new BufferedReader(new FileReader(MARGINS_FILE))) {
+            String line = margins.readLine();
+            if (line != null) workspaceMargins = WorkspaceMarginConfig.parse(line);
+        } catch (java.io.FileNotFoundException ignored) {
+            workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+        } catch (Exception error) {
+            log(Log.ERROR, TAG, "invalid workspace margins, retaining native geometry: "
+                    + error);
+            workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+        }
         try (BufferedReader reader = new BufferedReader(new FileReader(CONFIG_FILE))) {
             String line = reader.readLine();
             if (line == null) return;
@@ -314,6 +332,27 @@ public final class LauncherModule extends XposedModule {
             log(Log.WARN, TAG, "loader status persistence unavailable: " + error);
         }
         log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
+    }
+
+    private synchronized void recordMarginState(Context context,
+            WorkspaceMarginConfig margins, int[] original, int[] actual) {
+        String value = "configured_dp=" + margins.serialize() + "\\n"
+                + "native_padding_px=" + java.util.Arrays.toString(original) + "\\n"
+                + "actual_padding_px=" + java.util.Arrays.toString(actual) + "\\n";
+        if (value.equals(lastMarginReport)) return;
+        lastMarginReport = value;
+        try {
+            File dir = context.getExternalFilesDir(null);
+            if (dir != null) {
+                try (java.io.FileOutputStream output = new java.io.FileOutputStream(
+                        new File(dir, "launcher_margin_status"))) {
+                    output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "workspace margin status unavailable: " + error);
+        }
+        log(Log.INFO, TAG, "workspace padding " + value.replace('\\n', ' '));
     }
 
     private void syncWorkspaceOccupancy(Object cell, ClassLoader loader,
@@ -815,6 +854,46 @@ public final class LauncherModule extends XposedModule {
             log(Log.INFO, TAG, "final model/loader grid bounds hook installed");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "final model/loader grid bounds hook failed: " + error);
+        }
+
+        // ColorOS 17.5.5 Workspace.setInsets() obtains native padding from
+        // DeviceProfile.mWorkspaceParam.l5c.h() and assigns it to PagedView.
+        // Adjust the Workspace view AFTER its native insets processing so
+        // widget sheets, Hotseat, and the shared DeviceProfile remain untouched.
+        // This changes layout coordinates, not item cellX/cellY or the DB.
+        try {
+            Class<?> workspace = Class.forName(
+                    "com.android.launcher3.Workspace", false, loader);
+            Method setInsets = HookSymbols.method(workspace, "setInsets",
+                    void.class, false, false, Rect.class);
+            hook(setInsets).intercept(chain -> {
+                Object result = chain.proceed();
+                WorkspaceMarginConfig margins = workspaceMargins;
+                if (!margins.isDefault() && chain.getThisObject() instanceof View) {
+                    try {
+                        View view = (View) chain.getThisObject();
+                        int[] original = {view.getPaddingLeft(), view.getPaddingTop(),
+                                view.getPaddingRight(), view.getPaddingBottom()};
+                        android.util.DisplayMetrics metrics =
+                                view.getResources().getDisplayMetrics();
+                        int width = view.getWidth() > 0 ? view.getWidth() : metrics.widthPixels;
+                        int height = view.getHeight() > 0 ? view.getHeight() : metrics.heightPixels;
+                        int[] adjusted = margins.adjust(original, metrics.density, width, height);
+                        if (!java.util.Arrays.equals(original, adjusted)) {
+                            view.setPadding(adjusted[0], adjusted[1],
+                                    adjusted[2], adjusted[3]);
+                        }
+                        recordMarginState(view.getContext(), margins, original, adjusted);
+                    } catch (Throwable error) {
+                        log(Log.ERROR, TAG, "workspace margin application failed: " + error);
+                    }
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "workspace padding customization installed"
+                    + " (17.5.5 Workspace.setInsets)");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace padding customization hook failed: " + error);
         }
 
         // Workspace pages are initialized from the IDP inside CellLayout's

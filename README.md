@@ -49,6 +49,20 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
 
+## 工作区位置与边距自定义（ColorOS 17.5.5）
+
+新增四侧独立调节：**左 / 上 / 右 / 下**，单位 dp，可输入 **-160～160** 的带符号整数。数值是在原生 Workspace padding 上的*增量*；全 0 完全保留系统默认几何。正数增加该侧留白、负数减少；例如 `左 +20，右 -20` 会将工作区向右移动约 20 dp（如果右边原始留白足够），而不改变网格行列或图标数据库坐标。
+
+设置页新增独立的「应用边距并重启桌面」和「恢复系统默认边距」入口；边距配置存于 `/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins`，格式为 `left top right bottom`，**不与旧版 `launcher_grid` 混用**。调整不会触发网格迁移或自动重排，也不会修改文件夹、Hotseat、所有应用和小组件面板本身的边距。工作区旋转时会沿当前物理方向重新应用相同的四侧 dp 增量。
+
+### 实现链路
+
+直接核实用户提供的 `OplusLauncher-17.5.5.apk`：`Workspace.setInsets(Rect)`（`classes.dex PC 0x000e`）读取 `DeviceProfile.mWorkspaceParam` 的 `l5c.h():Rect`，在 `0x001a` 调用 `View.setPadding(left, top, right, bottom)`，之后才继续设置分页间距并更新页/小组件大小。该原生 Padding 方法同时被 WidgetSheet 使用，因此模块**不 Hook 共享的 `l5c.h()`**；只在 `Workspace.setInsets` 执行完之后，对真正的 `Workspace` View 追加边距。这一层控制分页布局及拖拽坐标使用的 View Padding，而不是通过 `translationX/Y` 制造视觉与命中区域不一致。
+
+每次 `setInsets` 都以原生 padding 作为基准，不累加旧值。正边距总和最高约占可用视口对应轴的 72%，防止 8×4/4×8 网格被极端设置压缩到不可操作。会生成只读诊断 `launcher_margin_status`，包括配置的 dp 增量、原生 padding(px) 和实际 padding(px)。
+
+**验收建议**：先从 `左 12 / 上 12 / 右 0 / 下 0` 进行轻量测试，检查图标实际偏移、水平换页、拖拽放置、Hotseat 是否保持原位，再旋转到竖屏核验。当前仅证明 17.5.5 相关 Hook 入口和配置逻辑成立，最终效果需要真机验收。
+
 ## 修复 17.5.5 竖屏仍保持 8×4（显示方向与模型边界）
 
 在真实 17.5.5 DEX 中，`uh9.c():boolean` 只检查 `yn9.m()` 和 `i94.s(yn9.e)`，**不是**当前屏幕方向检测；`InvariantDeviceProfile.setColumnsAndRows` 仅在该特性判断为真且原始列数大于行数时才交换两轴。之前的 `effectiveWorkspaceGrid()` 错误地使用 `uh9.c` 当竖屏判断，`yn9.v(Pair)` 更是始终返回 8×4，导致横竖屏不同步。
