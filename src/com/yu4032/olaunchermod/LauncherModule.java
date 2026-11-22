@@ -30,6 +30,7 @@ public final class LauncherModule extends XposedModule {
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
     private long lastRead;
+    private volatile String lastRotationGridLog = "";
 
     private synchronized void refresh() {
         long now = System.currentTimeMillis();
@@ -307,6 +308,86 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "persistent grid hook failed: " + error);
         }
 
+
+        // RotationLayoutUtils caches the landscape grid independently of IDP.
+        // During startup OplusLoaderCursor.checkItemPlacement calls
+        // ScreenRotationHelper.I(...), which may return p5.c.a(0) rather than
+        // the incoming IDP dimensions. If that cache is still 6x4, cells in
+        // columns 7/8 fail placement validation and LoaderCursor.commitDeleted
+        // PERMANENTLY deletes their database records. Keep the cache and both
+        // orientation-specific accessors on the same configured dimensions.
+        try {
+            Class<?> rotation = Class.forName("p5.c", false, loader);
+            Class<?> pair = Class.forName("kotlin.Pair", false, loader);
+            java.lang.reflect.Constructor<?> pairCtor = pair.getConstructor(
+                    Object.class, Object.class);
+            java.lang.reflect.Field landscapeCache = rotation.getDeclaredField("a");
+            landscapeCache.setAccessible(true);
+            Method dimensions = rotation.getDeclaredMethod("a", int.class);
+            hook(dimensions).intercept(chain -> {
+                refresh();
+                if (requestedColumns == 0 || requestedRows == 0) {
+                    return chain.proceed();
+                }
+                int orientation = (Integer) chain.getArgs().get(0);
+                // p5.c.a(0) = landscape; p5.c.a(1) = portrait.
+                Object horizontal = pairCtor.newInstance(
+                        requestedColumns, requestedRows);
+                landscapeCache.set(null, horizontal);
+                Object effective = orientation == 1
+                        ? pairCtor.newInstance(requestedRows, requestedColumns)
+                        : horizontal;
+                String fingerprint = requestedColumns + "x" + requestedRows;
+                if (!fingerprint.equals(lastRotationGridLog)) {
+                    lastRotationGridLog = fingerprint;
+                    log(Log.INFO, TAG, "rotation/loader bounds synchronized: "
+                            + fingerprint + " (portrait "
+                            + requestedRows + "x" + requestedColumns + ")");
+                }
+                return effective;
+            });
+            log(Log.INFO, TAG, "rotation and loader grid bounds hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "rotation and loader grid hook failed: " + error);
+        }
+
+        // Observe placement failures; never bypass validation or suppress
+        // unrelated database deletions. A real collision must still be rejected.
+        try {
+            Class<?> cursor = Class.forName(
+                    "com.android.launcher3.model.OplusLoaderCursor", false, loader);
+            Class<?> itemClass = Class.forName(
+                    "com.android.launcher3.model.data.ItemInfo", false, loader);
+            Class<?> screens = Class.forName(
+                    "com.android.launcher3.util.IntArray", false, loader);
+            Method placement = cursor.getDeclaredMethod(
+                    "checkItemPlacement", itemClass, screens);
+            hook(placement).intercept(chain -> {
+                Object result = chain.proceed();
+                if (Boolean.FALSE.equals(result) && requestedColumns > 0) {
+                    Object item = chain.getArgs().get(0);
+                    try {
+                        int container = itemClass.getField("container").getInt(item);
+                        if (container == -100) {
+                            int x = integer(item, "getCellX");
+                            int y = integer(item, "getCellY");
+                            int w = integer(item, "getSpanX");
+                            int h = integer(item, "getSpanY");
+                            log(Log.ERROR, TAG, "workspace loader rejected position "
+                                    + x + "," + y + " span " + w + "x" + h
+                                    + "; configured landscape "
+                                    + requestedColumns + "x" + requestedRows);
+                        }
+                    } catch (Throwable error) {
+                        log(Log.WARN, TAG, "workspace placement failure: " + error);
+                    }
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "workspace loader diagnostics installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace loader diagnostics hook failed: " + error);
+        }
 
         // c6.b(Context) is the normal-mode source of native grid dimensions.
         // Its result also feeds RotationLayoutUtils, so keeping it in sync
