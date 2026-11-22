@@ -35,6 +35,7 @@ public final class LauncherModule extends XposedModule {
     private volatile String lastRotationGridLog = "";
     private volatile String lastGridReport = "";
     private volatile String lastLoaderBoundsReport = "";
+    private volatile boolean freeModeQueryObserved;
     private final ThreadLocal<Boolean> migrationResetPending = new ThreadLocal<>();
 
     private synchronized void refresh() {
@@ -111,46 +112,61 @@ public final class LauncherModule extends XposedModule {
 
         String sourceDb = string(source, "getDbFile");
         String targetDb = string(target, "getDbFile");
-        if (sourceDb == null || sourceDb.isEmpty()
-                || !Objects.equals(sourceDb, targetDb)) return false;
-        if (integer(source, "getNumHotseat") != integer(target, "getNumHotseat")) return false;
-        if (integer(source, "getDeviceType") != integer(target, "getDeviceType")) return false;
-
+        boolean sameDatabase = sourceDb != null && !sourceDb.isEmpty()
+                && Objects.equals(sourceDb, targetDb);
+        boolean sameHotseat = integer(source, "getNumHotseat")
+                == integer(target, "getNumHotseat");
+        boolean sameDevice = integer(source, "getDeviceType")
+                == integer(target, "getDeviceType");
         int oldColumns = integer(source, "getColumns");
         int oldRows = integer(source, "getRows");
         int newColumns = integer(target, "getColumns");
         int newRows = integer(target, "getRows");
+        if (!LayoutPersistencePolicy.preserveOnExpansion(oldColumns, oldRows,
+                newColumns, newRows, sameDatabase, sameHotseat, sameDevice)) {
+            return false;
+        }
+
         File file = context.getDatabasePath(targetDb);
         if (!file.isFile()) return false;
-
-        java.util.List<GridIntegrity.Placement> placements = new java.util.ArrayList<>();
+        // Record data anomalies, but never respond to a widget's old portrait
+        // coordinates by invoking the native destructive/repacking migration.
+        // All existing coordinates remain unchanged during pure expansion.
         try (SQLiteDatabase db = SQLiteDatabase.openDatabase(
                 file.getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
+            java.util.List<GridIntegrity.Placement> placements = new java.util.ArrayList<>();
             try (Cursor cursor = db.rawQuery(
                     "SELECT screen,cellX,cellY,spanX,spanY,vCellX,vCellY "
                             + "FROM singledesktopitems WHERE container=-100", null)) {
                 while (cursor.moveToNext()) {
                     if (cursor.isNull(0) || cursor.isNull(1) || cursor.isNull(2)
-                            || cursor.isNull(3) || cursor.isNull(4)) return false;
-                    int portraitX = cursor.isNull(5) ? -1 : cursor.getInt(5);
-                    int portraitY = cursor.isNull(6) ? -1 : cursor.getInt(6);
+                            || cursor.isNull(3) || cursor.isNull(4)) continue;
                     placements.add(new GridIntegrity.Placement(
                             cursor.getInt(0), cursor.getInt(1), cursor.getInt(2),
-                            cursor.getInt(3), cursor.getInt(4), portraitX, portraitY));
+                            cursor.getInt(3), cursor.getInt(4),
+                            cursor.isNull(5) ? -1 : cursor.getInt(5),
+                            cursor.isNull(6) ? -1 : cursor.getInt(6)));
                 }
             }
-        }
-        if (!GridIntegrity.canPreserveExpansion(
-                oldColumns, oldRows, newColumns, newRows, placements)) {
-            log(Log.WARN, TAG, "expansion requires native migration: "
-                    + oldColumns + "x" + oldRows + " -> "
-                    + newColumns + "x" + newRows
-                    + "; records=" + placements.size());
-            return false;
+            if (!GridIntegrity.canPreserveExpansion(
+                    oldColumns, oldRows, newColumns, newRows, placements)) {
+                log(Log.WARN, TAG, "preserving existing layout despite incompatible "
+                        + "portrait coordinates/overlaps; never migrate widgets on "
+                        + "pure expansion, records=" + placements.size());
+            }
+        } catch (Throwable error) {
+            // A missing optional diagnostic column must not enable a
+            // destructive migration on an otherwise same-DB grid expansion.
+            log(Log.WARN, TAG, "expansion diagnostics unavailable: " + error);
         }
 
-        stateClass.getMethod("writeToPrefs", Context.class).invoke(target, context);
-        log(Log.INFO, TAG, "preserved icon coordinates on expansion "
+        try {
+            stateClass.getMethod("writeToPrefs", Context.class).invoke(target, context);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "migration metadata update failed; retaining "
+                    + "original DB records: " + error);
+        }
+        log(Log.INFO, TAG, "preserved workspace DB without reflow on expansion "
                 + oldColumns + "x" + oldRows + " -> " + newColumns + "x" + newRows);
         return true;
     }
@@ -452,48 +468,57 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "rotation and loader grid hook failed: " + error);
         }
 
-        // Failsafe: an otherwise in-bounds workspace row must not be permanently
-        // deleted solely because the loader saw a transient overlap. Keep the
-        // row for recovery, but do not pretend that it was bound successfully.
+        // Protect desktop widget records from irreversible cleanup due
+        // transient provider/size/placement failures while using a custom grid.
+        // Keep the row available for recovery; never claim it was displayed.
         try {
             Class<?> cursorClass = Class.forName(
                     "com.android.launcher3.model.OplusLoaderCursor", false, loader);
             Method mark = HookSymbols.method(cursorClass, "markDeleted",
                     void.class, false, false, String.class);
             hook(mark).intercept(chain -> {
-                refresh();
                 String reason = (String) chain.getArgs().get(0);
-                if (!"Item position overlap".equals(reason) || requestedColumns == 0) {
+                if (requestedColumns <= 0 || requestedRows <= 0) {
                     return chain.proceed();
                 }
                 try {
                     Cursor current = (Cursor) chain.getThisObject();
                     int container = current.getInt(
                             current.getColumnIndexOrThrow("container"));
+                    if (container != -100) return chain.proceed();
+                    int id = current.getInt(current.getColumnIndexOrThrow("_id"));
+                    int itemType = current.getInt(
+                            current.getColumnIndexOrThrow("itemType"));
                     int x = current.getInt(current.getColumnIndexOrThrow("cellX"));
                     int y = current.getInt(current.getColumnIndexOrThrow("cellY"));
                     int spanX = current.getInt(current.getColumnIndexOrThrow("spanX"));
                     int spanY = current.getInt(current.getColumnIndexOrThrow("spanY"));
-                    if (!GridIntegrity.shouldRetainRejectedItem(reason,
-                            container, x, y, spanX, spanY,
-                            requestedColumns, requestedRows)) {
-                        return chain.proceed();
+                    boolean widget = GridIntegrity.shouldRetainWidgetLoaderRow(
+                            container, itemType, reason, true);
+                    boolean overlap = GridIntegrity.shouldRetainRejectedItem(
+                            reason, container, x, y, spanX, spanY,
+                            requestedColumns, requestedRows);
+                    if (widget || overlap) {
+                        log(Log.ERROR, TAG, "preserved rejected workspace DB row id="
+                                + id + ", type=" + itemType + ", pos=" + x + "," + y
+                                + ", span=" + spanX + "x" + spanY
+                                + ", reason=" + reason);
+                        return null;
                     }
-                    int id = current.getInt(current.getColumnIndexOrThrow("_id"));
-                    log(Log.ERROR, TAG, "preserved rejected workspace DB row "
-                            + id + " at " + x + "," + y
-                            + " span=" + spanX + "x" + spanY
-                            + "; investigate loader occupancy");
-                    return null;
+                    if (itemType == 4 || itemType == 99) {
+                        log(Log.ERROR, TAG, "widget loader requested native deletion "
+                                + "id=" + id + ", reason=" + reason);
+                    }
                 } catch (Throwable error) {
-                    log(Log.ERROR, TAG, "layout-only deletion guard unavailable: "
+                    log(Log.ERROR, TAG, "layout deletion guard unable to inspect row: "
                             + error);
-                    return chain.proceed();
                 }
+                return chain.proceed();
             });
-            log(Log.INFO, TAG, "layout-only deletion guard installed");
+            log(Log.INFO, TAG, "widget and position loader deletion guard installed");
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "layout-only deletion guard failed: " + error);
+            log(Log.ERROR, TAG, "widget and position loader deletion guard failed: "
+                    + error);
         }
 
         // Observe placement failures; never bypass validation or suppress
@@ -571,53 +596,119 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "native grid source hook failed: " + error);
         }
 
-        // The arrangement selector controls OplusLoaderCursor, drag/drop,
-        // and the UI. The prior fillUpEmptyCell hook only addressed the UI.
+        // Three independent hooks. The old combined try block resolved
+        // b(Context) and e(boolean) BEFORE it installed c(). If either changed
+        // across versions, the loader's COMPACT/FREE query remained stock,
+        // and its COMPACT branch repacked 7th/8th column icons at startup.
+        try {
+            Class<?> arrangement = Class.forName(
+                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Method isCompact = HookSymbols.method(arrangement, "c",
+                    boolean.class, true, true);
+            hook(isCompact).intercept(chain -> {
+                if (LayoutPersistencePolicy.forceFree(
+                        requestedColumns, requestedRows, keepEmptySlots)) {
+                    if (!freeModeQueryObserved) {
+                        freeModeQueryObserved = true;
+                        log(Log.INFO, TAG, "FREE loader mode ACTIVE; "
+                                + "native compact repacking is disabled");
+                    }
+                    return Boolean.FALSE;
+                }
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "FREE model query installed: " + isCompact);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "CRITICAL: FREE model query hook failed; "
+                    + "startup compact reflow is still possible: " + error);
+        }
+
+        try {
+            Class<?> arrangement = Class.forName(
+                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Method setMode = HookSymbols.method(arrangement, "e",
+                    void.class, true, true, boolean.class);
+            hook(setMode).intercept(chain -> {
+                if (LayoutPersistencePolicy.forceFree(
+                        requestedColumns, requestedRows, keepEmptySlots)) {
+                    return chain.proceed(new Object[]{Boolean.FALSE});
+                }
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "FREE native mode setter installed: " + setMode);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "FREE native mode setter hook failed: " + error);
+        }
+
         try {
             Class<?> arrangement = Class.forName(
                     "com.android.launcher.layout.LayoutUtilsManager", false, loader);
             Method initMode = HookSymbols.method(arrangement, "b",
                     void.class, true, true, Context.class);
-            Method setMode = HookSymbols.method(arrangement, "e",
-                    void.class, true, true, boolean.class);
             hook(initMode).intercept(chain -> {
-                Object result = chain.proceed();
-                refresh();
-                if (requestedColumns > 0) {
-                    Context context = (Context) chain.getArgs().get(0);
+                Context context = (Context) chain.getArgs().get(0);
+                if (requestedColumns > 0 && requestedRows > 0) {
                     SharedPreferences prefs = context.getSharedPreferences(
                             OPLUS_PREFS, Context.MODE_PRIVATE);
-                    final String previousKey = "olaunchermod_previous_compact";
+                    String previousKey = "olaunchermod_previous_compact";
                     if (keepEmptySlots) {
-                        SharedPreferences.Editor editor = prefs.edit();
-                        if (!prefs.contains(previousKey)) {
-                            editor.putBoolean(previousKey,
-                                    prefs.getBoolean("layout_is_compact", true));
+                        if (prefs.getBoolean("layout_is_compact", true)
+                                || !prefs.contains(previousKey)) {
+                            SharedPreferences.Editor editor = prefs.edit();
+                            if (!prefs.contains(previousKey)) {
+                                editor.putBoolean(previousKey,
+                                        prefs.getBoolean("layout_is_compact", true));
+                            }
+                            editor.putBoolean("layout_is_compact", false).commit();
                         }
-                        editor.putBoolean("layout_is_compact", false).apply();
                     } else if (prefs.contains(previousKey)) {
                         boolean previous = prefs.getBoolean(previousKey, true);
                         prefs.edit().putBoolean("layout_is_compact", previous)
-                                .remove(previousKey).apply();
-                    }
-                    try {
-                        setMode.invoke(null, prefs.getBoolean("layout_is_compact", true));
-                    } catch (Throwable error) {
-                        log(Log.ERROR, TAG, "unable to restore arrangement mode: " + error);
+                                .remove(previousKey).commit();
                     }
                 }
-                return result;
+                // Native b() reads the preference and initializes the enum.
+                return chain.proceed();
             });
-            Method isCompact = HookSymbols.method(arrangement, "c",
-                    boolean.class, true, true);
-            hook(isCompact).intercept(chain -> {
-                refresh();
-                return requestedColumns > 0 && keepEmptySlots
-                        ? Boolean.FALSE : chain.proceed();
-            });
-            log(Log.INFO, TAG, "native FREE arrangement hooks installed");
+            log(Log.INFO, TAG, "FREE layout preference initializer installed: " + initMode);
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "native FREE arrangement hooks failed: " + error);
+            log(Log.ERROR, TAG, "FREE layout preference initializer failed: " + error);
+        }
+
+        // OplusLoaderCursor.commitUpdate() writes ONLY its private markUpdate()
+        // queue, populated by COMPACT position changes (including vertical
+        // compact arrangement). In FREE mode these commits must never rewrite
+        // the user's persisted coordinates, even if another native caller
+        // briefly forces COMPACT on an unsupported Launcher version.
+        try {
+            Class<?> cursor = Class.forName(
+                    "com.android.launcher3.model.OplusLoaderCursor", false, loader);
+            Method commit = HookSymbols.method(cursor, "commitUpdate",
+                    void.class, false, false);
+            hook(commit).intercept(chain -> {
+                if (LayoutPersistencePolicy.forceFree(
+                        requestedColumns, requestedRows, keepEmptySlots)) {
+                    try {
+                        java.lang.reflect.Field updates = HookSymbols.field(
+                                cursor, "mUpdateItemList", java.util.ArrayList.class,
+                                false, false);
+                        java.util.ArrayList<?> list =
+                                (java.util.ArrayList<?>) updates.get(chain.getThisObject());
+                        if (list != null && !list.isEmpty()) {
+                            log(Log.ERROR, TAG, "blocked " + list.size()
+                                    + " automatic COMPACT coordinate DB updates "
+                                    + "while FREE layout is configured");
+                        }
+                    } catch (Throwable error) {
+                        log(Log.WARN, TAG, "position-update diagnostic failed: " + error);
+                    }
+                    return null;
+                }
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "FREE startup coordinate write protection installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "FREE coordinate write protection failed: " + error);
         }
 
         // THIS is the shared, final boundary used by the real ColorOS
@@ -864,6 +955,33 @@ public final class LauncherModule extends XposedModule {
             log(Log.INFO, TAG, "expansion-safe migration hook installed");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "migration hook failed: " + error);
+        }
+
+        // A separate two-argument overload is used for some Launcher paths.
+        // Preview migration (non-null second argument) remains completely
+        // native. Only same-DB expansion with a null profile may be skipped.
+        try {
+            Class<?> migration = Class.forName(
+                    "com.android.launcher3.model.GridSizeMigrationTaskV2", false, loader);
+            Class<?> profile = Class.forName(
+                    "com.android.launcher3.OplusInvariantDeviceProfile", false, loader);
+            Method migrate = HookSymbols.method(migration, "migrateGridIfNeeded",
+                    boolean.class, true, false, Context.class, profile);
+            hook(migrate).intercept(chain -> {
+                if (chain.getArgs().get(1) == null && requestedColumns > 0) {
+                    try {
+                        if (preserveExpansion((Context) chain.getArgs().get(0), loader)) {
+                            return Boolean.TRUE;
+                        }
+                    } catch (Throwable error) {
+                        log(Log.WARN, TAG, "secondary migration guard failed: " + error);
+                    }
+                }
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "secondary non-preview expansion guard installed");
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "secondary migration overload unavailable: " + error);
         }
     }
 }

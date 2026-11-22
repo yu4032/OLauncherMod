@@ -89,6 +89,24 @@ final class GridIntegrity {
     }
 
     /**
+     * Widget loader failures often reflect temporarily unavailable providers
+     * or stale orientation/spans during grid changes. Preserve the DB row for
+     * recovery instead of committing an irreversible deletion.
+     *
+     * This does NOT bind a widget whose provider genuinely cannot be found.
+     * Other item types and unrelated deletion reasons remain native.
+     */
+    static boolean shouldRetainWidgetLoaderRow(int container, int itemType,
+            String reason, boolean customGridEnabled) {
+        if (!customGridEnabled || container != -100 || reason == null
+                || (itemType != 4 && itemType != 99)) return false;
+        return reason.startsWith("Item position overlap")
+                || reason.startsWith("Widget has invalid size")
+                || reason.startsWith("Unrestored widget removed")
+                || reason.startsWith("Deleting widget that isn't installed anymore");
+    }
+
+    /**
      * Canonical grid bounds for persisted horizontal cellX/cellY coordinates.
      * Callers may offer a stale IDP grid (such as 6x4 or rotated 4x8).
      */

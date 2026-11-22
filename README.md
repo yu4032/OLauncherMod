@@ -49,6 +49,18 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 43 项。
 
+## 7、8 列启动重排和小组件消失：数据保全修复
+
+归档源码显示 `OplusLoaderCursor.checkItemPlacement()` 的 COMPACT 分支会先找空位、`setCellXY()`、`markUpdate()`，然后由 `commitUpdate()` **永久写回新坐标**；FREE 分支才保留已有位置。旧版模块把 `LayoutUtilsManager.b/e/c` 三个 Hook 放在同一个 `try` 中，某个符号失败就连 `c()` 的模式判断也无法安装。
+
+本版按函数签名**独立安装**模式判断、模式设置和偏好初始化；在 `b(Context)` 读取偏好前写入 FREE。额外为 `OplusLoaderCursor.commitUpdate()` 增加防线：当模块明确开启保留空位时，不允许提交它的自动 COMPACT 坐标重排队列；普通拖拽仍通过 `ModelWriter` 保存，不依赖这个加载器方法。若触发阻断，会记录 `blocked ... automatic COMPACT coordinate DB updates`。
+
+在 6×4 → 8×4、数据库文件、设备类型和 Hotseat 未发生变化时，`GridSizeMigrationTaskV2` **不再因为小组件的旧竖屏坐标、跨格尺寸或已有位置冲突而回退执行原生迁移**。旧记录原样保留，只更新网格迁移状态，并分别保护一参数与非预览的二参数迁移入口。缩小网格或跨数据库/设备类型迁移仍遵循原生流程。
+
+对桌面小组件（已核验的 `itemType=4/99`），启动时遇到暂时缺失提供者、恢复标志不完整、非法跨度或占位冲突等明确原因，会**保留数据库行供后续恢复**；这并不意味着暂时缺少提供者的小组件能够立刻显示。实际卸载后的孤立小组件记录可能继续保留，需要用户主动清理。这是优先保护数据的取舍。
+
+**验证范围**：修复基于 ColorRE 中归档的 17.3.9 源码，不代表已经适配设备实际 Launcher 版本。CI 只能覆盖结构化测试和 APK 打包；恢复第 7、8 列和小组件可见性需要用实际设备验证。之前已经删除的行无法自动重建。
+
 ## 图标放置与挤压：工作区占用矩阵同步
 
 当配置从默认 6×4 扩展到 8×4 时，`CellLayout.setGridSize(int,int,boolean)` 会创建新的 **全空** `mOccupied` 和 `mTmpOccupied`。如果页面已经绑定图标，视图仍显示在原位置，但拖拽的 `isRegionVacant()`、`findCellForSpan()` 和 `OplusCellLayout.performReorder()` 会使用已清空的矩阵，错误判定已有图标位置为可放置区域。这是图标重叠与原生挤压失效的一条明确调用链。

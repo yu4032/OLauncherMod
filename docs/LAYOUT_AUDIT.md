@@ -26,6 +26,15 @@
 
 新增 `WorkspaceOccupancyTest` 10 项测试：6→8 列、7/8 列已有图标、跨格小组件、已有碰撞记录、正常空位、边界错误、禁止半写入等。静态实验只证明矩阵恢复算法，不证明设备上每个拖拽变体都已通过。
 
+## 本轮数据一致性审计：启动时重排与小组件丢失
+
+- **重排的直接写入路径**：`OplusLoaderCursor.checkItemPlacement` 的 COMPACT 分支将原坐标替换为下一个可用格，调用私有 `markUpdate` 收集项目；`OplusLoaderCursor.commitUpdate` 通过 ContentProviderOperation 批量写回新坐标。FREE 模式不应产生这种队列。
+- **分组 Hook 导致模式设置失败**：原模块必须先成功解析 `LayoutUtilsManager.b(Context)` 和 `e(boolean)` 才会 Hook `c()`。把模式判定、运行时设置和持久化初始化三个入口独立安装；在原生 `b` 读取 `layout_is_compact` 前写入 FREE；作为最后保护，在 FREE 下不允许 `commitUpdate` 写回 COMPACT 自动重排的队列。
+- **扩展迁移误降级**：原 `preserveExpansion()` 会因旧小组件的 `vCellX/vCellY` 越界、跨格尺寸或重复坐标而返回 false，转入原生迁移，期间可能删除/迁移项目。6→8 列且设备类型、Hotseat、数据库相同时，直接沿用既有数据库坐标，仅更新迁移状态；严格坐标验证改为**只记录异常**，而不决定是否允许破坏性迁移。二参数预览迁移仍保持原生。
+- **小组件加载清理**：`WorkspaceItemProcessor.processWidget()` 在提供者暂时不可用、恢复标志异常、尺寸无效时会通过 `markDeleted` 删除行。新增仅针对桌面小组件 `itemType 4/99` 的有限恢复保护，保留对应数据库行并记录日志。这意味着彻底卸载提供者的孤儿小组件记录可能暂存，但不强行显示失效小组件。
+- **与图标挤压的区别**：`WorkspaceOccupancySync` 只修复拖拽时 `mOccupied/mTmpOccupied` 被清空，不能消除 Loader 的 COMPACT 重排；两者属于不同阶段，均需单独验证。
+- **设备仍有不确定性**：现有源代码是归档 17.3.9，尚无目标设备实际 APK、启动时 Loader 的方法记录和数据库前后快照，不能声明兼容性已完全覆盖。
+
 ## 审计矩阵
 
 | 优先级 | 路径 / 风险 | 处理方式 | 验证层级 |

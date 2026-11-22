@@ -120,6 +120,31 @@ public class GridIntegrityTest {
         assertTrue(GridIntegrity.isCanonicalMigrationTarget(8, 4, 8, 4));
     }
 
+    @Test public void protectsWidgetFromTemporaryProviderGap() {
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+                "Deleting widget that isn't installed anymore: null", true));
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 99,
+                "Unrestored widget removed: test", true));
+    }
+
+    @Test public void protectsWidgetSpanAndPlacementDuringGridChanges() {
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+                "Widget has invalid size: 0x2", true));
+        assertTrue(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+                "Item position overlap", true));
+    }
+
+    @Test public void preservesNativeUnrelatedWidgetCleanup() {
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+                "unflatten component name error", true));
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 4,
+                "Unrestored widget removed: missing", false));
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-101, 4,
+                "Widget has invalid size: 0x2", true));
+        assertFalse(GridIntegrity.shouldRetainWidgetLoaderRow(-100, 0,
+                "Widget has invalid size: 0x2", true));
+    }
+
     @Test public void allowsPortraitCellsAndWidgets() {
         assertTrue(GridIntegrity.canPreserveExpansion(6, 4, 8, 4,
                 Arrays.asList(new GridIntegrity.Placement(0, 1, 1, 2, 2, 0, 3),
