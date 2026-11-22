@@ -1,6 +1,6 @@
 # OLauncherMod
 
-开发中
+开发中,面向ColorOS17的桌面自定义模块。
 
 - 目标应用：`com.android.launcher`（ColorOS 17.3.9）
 - minSdk 29 / targetSdk 36
