@@ -36,7 +36,7 @@
 src/com/yu4032/olaunchermod/LauncherModule.java  LSPosed Hook
 src/com/yu4032/olaunchermod/MainActivity.java    布局设置
 AndroidManifest.xml                              应用声明
-META-INF/xposed/                                 模块信息与作用域
+src/main/resources/META-INF/xposed/              模块信息与作用域
 res/                                             图标
 ```
 
@@ -50,4 +50,24 @@ res/                                             图标
 
 ## 构建
 
-依赖 `io.github.libxposed:api:102.0.0`、Android SDK（minSdk 29 / targetSdk 36）。仓库当前只有模块源码与元数据，尚未包含可直接运行的 Gradle 构建脚本或 CI；本次变更未完成 APK 构建和真机验证。
+依赖 JDK 17、Android SDK 36、Gradle 8.14.8、AGP 8.11.1，以及 `compileOnly 'io.github.libxposed:api:102.0.0'`。
+
+本地安装好 Gradle 和 Android SDK 后运行：
+
+```bash
+gradle assembleDebug
+```
+
+构建产物位于 `build/outputs/apk/debug/`，Debug 构建由 Android Gradle Plugin 自动使用开发调试密钥签名，可直接安装测试，不代表正式发布签名。
+
+### GitHub Actions
+
+工作流为 [Android CI](.github/workflows/android.yml)，在以下情况自动执行：
+
+- 推送到 `main`；
+- 创建或更新 Pull Request；
+- 合并后，可从 **Actions → Android CI → Run workflow** 手动触发。
+
+CI 会安装 Android SDK 36、编译 Debug APK、验证 APK 中的 `META-INF/xposed/{java_init.list,module.prop,scope.list}` 与模块入口，然后上传名为 `OLauncherMod-debug-<run_number>` 的 Artifact（保留 30 天）。从 Actions 的构建记录底部下载 ZIP，解压得到 `OLauncherMod-debug.apk`。
+
+**CI 编译和打包通过不等于原生 Hook 已经在 ColorOS 真机验证。** 安装前请备份桌面数据库。
