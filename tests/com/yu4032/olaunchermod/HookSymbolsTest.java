@@ -27,6 +27,34 @@ public class HookSymbolsTest {
     }
     static class Child extends Parent {}
 
+    static class MinimalIdp {
+        public void setColumnsAndRows(int columns, int rows) {}
+    }
+
+    static class MinimalWorkspace {
+        public void setGridSize(int columns, int rows) {}
+        // No rotation helper, model loader or arrangement helper exists here.
+    }
+
+    static class MissingIdp {
+        public void unrelated() {}
+    }
+
+    @Test public void coreGridDoesNotDependOnOptionalSymbols() throws Exception {
+        // Regression: debug-6 previously required every optional symbol before
+        // installing any hook, making a working 8x4 grid revert to 6x4.
+        HookSymbols.requireVisualGridMethods(
+                MinimalIdp.class, MinimalWorkspace.class);
+    }
+
+    @Test public void missingEssentialGridSetterIsRejected() throws Exception {
+        try {
+            HookSymbols.requireVisualGridMethods(
+                    MissingIdp.class, MinimalWorkspace.class);
+            fail("missing essential setter must fail");
+        } catch (NoSuchMethodException expected) { }
+    }
+
     @Test public void resolvesByNameAndSignature() throws Exception {
         Method m = HookSymbols.method(Fixture.class, "named", String.class, true,
                 false, int.class);

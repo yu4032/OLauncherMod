@@ -272,59 +272,25 @@ public final class LauncherModule extends XposedModule {
     }
 
     /**
-     * Do not partially alter the launcher's grid if the critical version-
-     * dependent symbols cannot all be resolved. Data-loading mismatch is
-     * worse than an unchanged default grid.
+     * A hard failure is justified only for the TWO methods responsible for
+     * displaying the actual workspace grid. All loader, rotation, arrangement
+     * and migration symbols are OPTIONAL capabilities: their hooks are resolved
+     * in independent try/catch blocks below. Requiring them all here caused
+     * debug-6 to skip even the previously working 8x4 workspace hooks.
      */
-    private boolean preflightGridSymbols(ClassLoader loader) {
+    private boolean preflightVisualGridSymbols(ClassLoader loader) {
         try {
-            Class<?> pair = Class.forName("kotlin.Pair", false, loader);
             Class<?> idp = Class.forName(
                     "com.android.launcher3.InvariantDeviceProfile", false, loader);
-            HookSymbols.method(idp, "setColumnsAndRows", void.class, false,
-                    false, int.class, int.class);
             Class<?> cell = Class.forName(
                     "com.android.launcher3.OplusCellLayout", false, loader);
-            HookSymbols.method(cell, "setGridSize", void.class, false,
-                    false, int.class, int.class);
-            Class<?> baseCell = Class.forName(
-                    "com.android.launcher3.CellLayout", false, loader);
-            HookSymbols.method(baseCell, "setGridSize", void.class, false,
-                    false, int.class, int.class, boolean.class);
-            Class<?> cursor = Class.forName(
-                    "com.android.launcher3.model.OplusLoaderCursor", false, loader);
-            Class<?> item = Class.forName(
-                    "com.android.launcher3.model.data.ItemInfo", false, loader);
-            Class<?> screens = Class.forName(
-                    "com.android.launcher3.util.IntArray", false, loader);
-            HookSymbols.method(cursor, "checkItemPlacement", boolean.class,
-                    false, false, item, screens);
-            Class<?> helper = Class.forName("j5.i", false, loader);
-            Method boundary = HookSymbols.method(helper, "I", pair,
-                    false, true, pair);
-            Class<?> grid = Class.forName("com.android.launcher.c6", false, loader);
-            HookSymbols.method(grid, "b", int[].class, true, false, Context.class);
-            Class<?> rotation = Class.forName("p5.c", false, loader);
-            Method orientation = HookSymbols.method(rotation, "a", pair,
-                    true, true, int.class);
-            HookSymbols.field(rotation, "a", pair, true, true);
-            if (keepEmptySlots) {
-                Class<?> arrangement = Class.forName(
-                        "com.android.launcher.layout.LayoutUtilsManager", false, loader);
-                HookSymbols.method(arrangement, "b", void.class, true,
-                        true, Context.class);
-                HookSymbols.method(arrangement, "c", boolean.class, true, true);
-                HookSymbols.method(arrangement, "e", void.class, true,
-                        true, boolean.class);
-            }
-            log(Log.INFO, TAG, "verified grid symbols: final-boundary="
-                    + boundary.getDeclaringClass().getName() + "#" + boundary.getName()
-                    + ", orientation=" + orientation.getDeclaringClass().getName()
-                    + "#" + orientation.getName());
+            HookSymbols.requireVisualGridMethods(idp, cell);
+            log(Log.INFO, TAG, "visual grid symbols verified; "
+                    + "installing workspace hooks independently of optional symbols");
             return true;
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "unsupported Launcher symbol layout; "
-                    + "skipping ALL grid hooks to protect desktop data: " + error);
+            log(Log.ERROR, TAG, "essential workspace methods unavailable; "
+                    + "no custom grid hooks installed: " + error);
             return false;
         }
     }
@@ -334,7 +300,7 @@ public final class LauncherModule extends XposedModule {
         if (!"com.android.launcher".equals(param.getPackageName())) return;
         ClassLoader loader = param.getDefaultClassLoader();
         refresh();
-        if (requestedColumns > 0 && !preflightGridSymbols(loader)) return;
+        if (requestedColumns > 0 && !preflightVisualGridSymbols(loader)) return;
 
         try {
             Class<?> idp = Class.forName(

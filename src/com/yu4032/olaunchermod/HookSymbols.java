@@ -20,6 +20,19 @@ import java.util.List;
 final class HookSymbols {
     private HookSymbols() {}
 
+    /**
+     * Core workspace capabilities, deliberately independent of model loading,
+     * rotation and the optional arrangement helper. This separation is what
+     * prevents an unrelated symbol rename from disabling the visible grid.
+     */
+    static void requireVisualGridMethods(Class<?> idpClass, Class<?> cellClass)
+            throws ReflectiveOperationException {
+        method(idpClass, "setColumnsAndRows", void.class, false, false,
+                int.class, int.class);
+        method(cellClass, "setGridSize", void.class, false, false,
+                int.class, int.class);
+    }
+
     static Method method(Class<?> owner, String name, Class<?> result,
             boolean staticMethod, boolean allowUniqueFallback,
             Class<?>... parameters) throws ReflectiveOperationException {
