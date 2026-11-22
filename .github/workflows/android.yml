@@ -40,8 +40,8 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
 
-      - name: Build debug APK
-        run: gradle --no-daemon --stacktrace assembleDebug
+      - name: Run grid integrity tests and build debug APK
+        run: gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
 
       - name: Verify LSPosed metadata
         shell: bash

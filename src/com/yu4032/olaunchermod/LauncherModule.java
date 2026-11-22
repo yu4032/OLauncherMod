@@ -29,13 +29,16 @@ public final class LauncherModule extends XposedModule {
     private volatile int requestedColumns;
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
-    private long lastRead;
+    // A layout change requires a fresh Launcher process, never a mid-drag
+    // configuration swap between live views, loader and database.
+    private boolean configInitialized;
     private volatile String lastRotationGridLog = "";
+    private volatile String lastGridReport = "";
+    private final ThreadLocal<Boolean> migrationResetPending = new ThreadLocal<>();
 
     private synchronized void refresh() {
-        long now = System.currentTimeMillis();
-        if (now - lastRead < 2000L) return;
-        lastRead = now;
+        if (configInitialized) return;
+        configInitialized = true;
         try (BufferedReader reader = new BufferedReader(new FileReader(CONFIG_FILE))) {
             String line = reader.readLine();
             if (line == null) return;
@@ -117,27 +120,33 @@ public final class LauncherModule extends XposedModule {
         int oldRows = integer(source, "getRows");
         int newColumns = integer(target, "getColumns");
         int newRows = integer(target, "getRows");
-        if (oldColumns < 1 || oldRows < 1
-                || newColumns < oldColumns || newRows < oldRows
-                || (newColumns == oldColumns && newRows == oldRows)) return false;
-
         File file = context.getDatabasePath(targetDb);
         if (!file.isFile()) return false;
+
+        java.util.List<GridIntegrity.Placement> placements = new java.util.ArrayList<>();
         try (SQLiteDatabase db = SQLiteDatabase.openDatabase(
                 file.getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
             try (Cursor cursor = db.rawQuery(
-                    "SELECT cellX,cellY,spanX,spanY FROM singledesktopitems WHERE container=-100",
-                    null)) {
+                    "SELECT screen,cellX,cellY,spanX,spanY,vCellX,vCellY "
+                            + "FROM singledesktopitems WHERE container=-100", null)) {
                 while (cursor.moveToNext()) {
-                    if (cursor.isNull(0) || cursor.isNull(1)) return false;
-                    int x = cursor.getInt(0);
-                    int y = cursor.getInt(1);
-                    int w = Math.max(1, cursor.getInt(2));
-                    int h = Math.max(1, cursor.getInt(3));
-                    if (x < 0 || y < 0
-                            || x + w > newColumns || y + h > newRows) return false;
+                    if (cursor.isNull(0) || cursor.isNull(1) || cursor.isNull(2)
+                            || cursor.isNull(3) || cursor.isNull(4)) return false;
+                    int portraitX = cursor.isNull(5) ? -1 : cursor.getInt(5);
+                    int portraitY = cursor.isNull(6) ? -1 : cursor.getInt(6);
+                    placements.add(new GridIntegrity.Placement(
+                            cursor.getInt(0), cursor.getInt(1), cursor.getInt(2),
+                            cursor.getInt(3), cursor.getInt(4), portraitX, portraitY));
                 }
             }
+        }
+        if (!GridIntegrity.canPreserveExpansion(
+                oldColumns, oldRows, newColumns, newRows, placements)) {
+            log(Log.WARN, TAG, "expansion requires native migration: "
+                    + oldColumns + "x" + oldRows + " -> "
+                    + newColumns + "x" + newRows
+                    + "; records=" + placements.size());
+            return false;
         }
 
         stateClass.getMethod("writeToPrefs", Context.class).invoke(target, context);
@@ -201,6 +210,10 @@ public final class LauncherModule extends XposedModule {
                     + "expected_workspace=" + effective[0] + "x" + effective[1] + "\n"
                     + "actual_workspace=" + actualX + "x" + actualY + "\n"
                     + "match=" + (actualX == effective[0] && actualY == effective[1]) + "\n";
+            String identity = effective[0] + "x" + effective[1]
+                    + "/" + actualX + "x" + actualY;
+            if (identity.equals(lastGridReport)) return;
+            lastGridReport = identity;
             try (java.io.FileOutputStream output = new java.io.FileOutputStream(
                     new File(dir, "launcher_grid_status"))) {
                 output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -329,26 +342,74 @@ public final class LauncherModule extends XposedModule {
                 if (requestedColumns == 0 || requestedRows == 0) {
                     return chain.proceed();
                 }
-                int orientation = (Integer) chain.getArgs().get(0);
-                // p5.c.a(0) = landscape; p5.c.a(1) = portrait.
-                Object horizontal = pairCtor.newInstance(
-                        requestedColumns, requestedRows);
-                landscapeCache.set(null, horizontal);
-                Object effective = orientation == 1
-                        ? pairCtor.newInstance(requestedRows, requestedColumns)
-                        : horizontal;
-                String fingerprint = requestedColumns + "x" + requestedRows;
-                if (!fingerprint.equals(lastRotationGridLog)) {
-                    lastRotationGridLog = fingerprint;
-                    log(Log.INFO, TAG, "rotation/loader bounds synchronized: "
-                            + fingerprint + " (portrait "
-                            + requestedRows + "x" + requestedColumns + ")");
+                try {
+                    int orientation = (Integer) chain.getArgs().get(0);
+                    // p5.c.a(0) = landscape; p5.c.a(1) = portrait.
+                    Object horizontal = pairCtor.newInstance(
+                            requestedColumns, requestedRows);
+                    landscapeCache.set(null, horizontal);
+                    Object effective = orientation == 1
+                            ? pairCtor.newInstance(requestedRows, requestedColumns)
+                            : horizontal;
+                    String fingerprint = requestedColumns + "x" + requestedRows;
+                    if (!fingerprint.equals(lastRotationGridLog)) {
+                        lastRotationGridLog = fingerprint;
+                        log(Log.INFO, TAG, "rotation/loader bounds synchronized: "
+                                + fingerprint + " (portrait "
+                                + requestedRows + "x" + requestedColumns + ")");
+                    }
+                    return effective;
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "rotation grid override failed: " + error);
+                    return chain.proceed();
                 }
-                return effective;
             });
             log(Log.INFO, TAG, "rotation and loader grid bounds hook installed");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "rotation and loader grid hook failed: " + error);
+        }
+
+        // Failsafe: an otherwise in-bounds workspace row must not be permanently
+        // deleted solely because the loader saw a transient overlap. Keep the
+        // row for recovery, but do not pretend that it was bound successfully.
+        try {
+            Class<?> cursorClass = Class.forName(
+                    "com.android.launcher3.model.OplusLoaderCursor", false, loader);
+            Method mark = cursorClass.getDeclaredMethod("markDeleted", String.class);
+            hook(mark).intercept(chain -> {
+                refresh();
+                String reason = (String) chain.getArgs().get(0);
+                if (!"Item position overlap".equals(reason) || requestedColumns == 0) {
+                    return chain.proceed();
+                }
+                try {
+                    Cursor current = (Cursor) chain.getThisObject();
+                    int container = current.getInt(
+                            current.getColumnIndexOrThrow("container"));
+                    int x = current.getInt(current.getColumnIndexOrThrow("cellX"));
+                    int y = current.getInt(current.getColumnIndexOrThrow("cellY"));
+                    int spanX = current.getInt(current.getColumnIndexOrThrow("spanX"));
+                    int spanY = current.getInt(current.getColumnIndexOrThrow("spanY"));
+                    if (!GridIntegrity.shouldRetainRejectedItem(reason,
+                            container, x, y, spanX, spanY,
+                            requestedColumns, requestedRows)) {
+                        return chain.proceed();
+                    }
+                    int id = current.getInt(current.getColumnIndexOrThrow("_id"));
+                    log(Log.ERROR, TAG, "preserved rejected workspace DB row "
+                            + id + " at " + x + "," + y
+                            + " span=" + spanX + "x" + spanY
+                            + "; investigate loader occupancy");
+                    return null;
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "layout-only deletion guard unavailable: "
+                            + error);
+                    return chain.proceed();
+                }
+            });
+            log(Log.INFO, TAG, "layout-only deletion guard installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "layout-only deletion guard failed: " + error);
         }
 
         // Observe placement failures; never bypass validation or suppress
@@ -389,6 +450,23 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "workspace loader diagnostics hook failed: " + error);
         }
 
+        // Prevent the OS12 compatibility converter from rewriting an explicit
+        // custom grid with a legacy 4x5 / 6x5 layout while c6.b is reading it.
+        try {
+            Class<?> legacy = Class.forName(
+                    "com.android.launcher3.model.OplusUnionGridCompatHelper", false, loader);
+            Method compat = legacy.getDeclaredMethod(
+                    "updateGridIfNeeded", Context.class, int[].class);
+            hook(compat).intercept(chain -> {
+                refresh();
+                if (requestedColumns > 0 && requestedRows > 0) return null;
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "legacy grid compat hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "legacy grid compat hook failed: " + error);
+        }
+
         // c6.b(Context) is the normal-mode source of native grid dimensions.
         // Its result also feeds RotationLayoutUtils, so keeping it in sync
         // prevents a later orientation pass from restoring the stock 6-column grid.
@@ -404,6 +482,52 @@ public final class LauncherModule extends XposedModule {
             log(Log.INFO, TAG, "native grid source hook installed");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "native grid source hook failed: " + error);
+        }
+
+        // The arrangement selector controls OplusLoaderCursor, drag/drop,
+        // and the UI. The prior fillUpEmptyCell hook only addressed the UI.
+        try {
+            Class<?> arrangement = Class.forName(
+                    "com.android.launcher.layout.LayoutUtilsManager", false, loader);
+            Method initMode = arrangement.getDeclaredMethod("b", Context.class);
+            Method setMode = arrangement.getDeclaredMethod("e", boolean.class);
+            hook(initMode).intercept(chain -> {
+                Object result = chain.proceed();
+                refresh();
+                if (requestedColumns > 0) {
+                    Context context = (Context) chain.getArgs().get(0);
+                    SharedPreferences prefs = context.getSharedPreferences(
+                            OPLUS_PREFS, Context.MODE_PRIVATE);
+                    final String previousKey = "olaunchermod_previous_compact";
+                    if (keepEmptySlots) {
+                        SharedPreferences.Editor editor = prefs.edit();
+                        if (!prefs.contains(previousKey)) {
+                            editor.putBoolean(previousKey,
+                                    prefs.getBoolean("layout_is_compact", true));
+                        }
+                        editor.putBoolean("layout_is_compact", false).apply();
+                    } else if (prefs.contains(previousKey)) {
+                        boolean previous = prefs.getBoolean(previousKey, true);
+                        prefs.edit().putBoolean("layout_is_compact", previous)
+                                .remove(previousKey).apply();
+                    }
+                    try {
+                        setMode.invoke(null, prefs.getBoolean("layout_is_compact", true));
+                    } catch (Throwable error) {
+                        log(Log.ERROR, TAG, "unable to restore arrangement mode: " + error);
+                    }
+                }
+                return result;
+            });
+            Method isCompact = arrangement.getDeclaredMethod("c");
+            hook(isCompact).intercept(chain -> {
+                refresh();
+                return requestedColumns > 0 && keepEmptySlots
+                        ? Boolean.FALSE : chain.proceed();
+            });
+            log(Log.INFO, TAG, "native FREE arrangement hooks installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "native FREE arrangement hooks failed: " + error);
         }
 
         // Workspace pages are initialized from the IDP inside CellLayout's
@@ -438,9 +562,13 @@ public final class LauncherModule extends XposedModule {
                 if (!isWorkspaceCell(cell) || requestedColumns <= 0) return chain.proceed();
                 int[] effective = effectiveWorkspaceGrid(loader);
                 Object result = chain.proceed(new Object[]{effective[0], effective[1]});
-                int[] actual = actualGrid(cell);
-                recordGridState(((android.view.View) cell).getContext(),
-                        "setGridSize_2", loader, actual[0], actual[1]);
+                try {
+                    int[] actual = actualGrid(cell);
+                    recordGridState(((android.view.View) cell).getContext(),
+                            "setGridSize_2", loader, actual[0], actual[1]);
+                } catch (Throwable error) {
+                    log(Log.WARN, TAG, "2-arg workspace diagnostic failed: " + error);
+                }
                 return result;
             });
             log(Log.INFO, TAG, "workspace 2-arg grid hook installed");
@@ -462,9 +590,13 @@ public final class LauncherModule extends XposedModule {
                 boolean relayout = (Boolean) chain.getArgs().get(2);
                 Object result = chain.proceed(new Object[]{
                         effective[0], effective[1], relayout});
-                int[] actual = actualGrid(cell);
-                recordGridState(((android.view.View) cell).getContext(),
-                        "setGridSize_3", loader, actual[0], actual[1]);
+                try {
+                    int[] actual = actualGrid(cell);
+                    recordGridState(((android.view.View) cell).getContext(),
+                            "setGridSize_3", loader, actual[0], actual[1]);
+                } catch (Throwable error) {
+                    log(Log.WARN, TAG, "3-arg workspace diagnostic failed: " + error);
+                }
                 return result;
             });
             log(Log.INFO, TAG, "workspace 3-arg grid hook installed");
@@ -502,7 +634,8 @@ public final class LauncherModule extends XposedModule {
                     "fillUpEmptyCell", int[].class, int[].class, boolean.class, boolean.class);
             hook(compact).intercept(chain -> {
                 refresh();
-                if (requestedColumns > 0 && requestedRows > 0 && keepEmptySlots) {
+                if (requestedColumns > 0 && requestedRows > 0 && keepEmptySlots
+                        && isWorkspaceCell(chain.getThisObject())) {
                     return null;
                 }
                 return chain.proceed();
@@ -512,6 +645,31 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "free-placement hook failed: " + error);
         }
 
+        // LoaderTask.loadWorkspace calls create_empty_db immediately after a
+        // failed migration. Guard only that one failure on the same thread;
+        // never suppress a user-initiated reset or another caller's request.
+        try {
+            Class<?> settings = Class.forName(
+                    "com.android.launcher3.LauncherSettings$Settings", false, loader);
+            Method call = settings.getDeclaredMethod(
+                    "call", android.content.ContentResolver.class,
+                    String.class, String.class);
+            hook(call).intercept(chain -> {
+                if ("create_empty_db".equals(chain.getArgs().get(1))
+                        && Boolean.TRUE.equals(migrationResetPending.get())
+                        && requestedColumns > 0) {
+                    migrationResetPending.remove();
+                    log(Log.ERROR, TAG, "prevented destructive launcher DB reset "
+                            + "after failed custom-grid migration");
+                    return new android.os.Bundle();
+                }
+                return chain.proceed();
+            });
+            log(Log.INFO, TAG, "migration-failure DB reset guard installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "migration-failure DB reset guard failed: " + error);
+        }
+
         try {
             Class<?> migration = Class.forName(
                     "com.android.launcher3.model.GridSizeMigrationTaskV2", false, loader);
@@ -519,6 +677,7 @@ public final class LauncherModule extends XposedModule {
                     "migrateGridIfNeeded", Context.class);
             hook(migrate).intercept(chain -> {
                 refresh();
+                migrationResetPending.remove();
                 try {
                     if (preserveExpansion((Context) chain.getArgs().get(0), loader)) {
                         return Boolean.TRUE;
@@ -526,7 +685,13 @@ public final class LauncherModule extends XposedModule {
                 } catch (Throwable error) {
                     log(Log.WARN, TAG, "native migration retained: " + error);
                 }
-                return chain.proceed();
+                Object result = chain.proceed();
+                if (Boolean.FALSE.equals(result) && requestedColumns > 0) {
+                    migrationResetPending.set(Boolean.TRUE);
+                    log(Log.ERROR, TAG, "native grid migration failed; "
+                            + "blocking automatic create_empty_db on this loader thread");
+                }
+                return result;
             });
             log(Log.INFO, TAG, "expansion-safe migration hook installed");
         } catch (Throwable error) {

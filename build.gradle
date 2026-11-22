@@ -22,6 +22,9 @@ android {
             res.srcDirs = ['res']
             resources.srcDirs = ['src/main/resources']
         }
+        test {
+            java.srcDirs = ['tests']
+        }
     }
 
     compileOptions {
@@ -39,4 +42,5 @@ android {
 dependencies {
     // Provided by the LSPosed framework at runtime.
     compileOnly 'io.github.libxposed:api:102.0.0'
+    testImplementation 'junit:junit:4.13.2'
 }
