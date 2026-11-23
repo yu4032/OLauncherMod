@@ -49,6 +49,28 @@ ColorOS 新平板布局的 `OplusLoaderCursor.checkItemPlacement()` 不总是使
 
 符号解析包含 12 项单元测试，其中两项专门防止可选符号失败导致整个工作区网格被禁用；另有 21 项网格完整性测试，CI 共执行 53 项。
 
+## Compose 设置界面与竖屏自适应高度（17.5.5）
+
+- **UI 完整迁移**：网格主页与工作区位置页改为 Kotlin Jetpack Compose（Material3、ColorOS 风格圆角分组、横竖屏独立滑块、精确数值输入、微调、重置与状态诊断）；不再保留旧 Java Activity 的输入框布局。
+- **Android 兼容**：继续使用 AGP 8.11.1 / compileSdk 36，Kotlin 2.2.20、Compose BOM 2025.09.00；暂不引入需要更新 Kotlin/Compose 运行时的第三方 COUI 1.1.0。视觉参考 COUI，但不是 OEM 私有 COUI 控件。
+- **竖屏动态高度**：17.5.5 的 `PagedView.onMeasure` 只扣除 Insets，没有扣除 Workspace 自身上下 Padding。现在对真实 Workspace 页面的纵向 MeasureSpec 扣除当前已应用的顶部和底部 Padding，再由原生 `CellLayout.onMeasure` 按 4×8 的 8 行重算单元格高度，超过剩余空间的旧固定单元格尺寸会被释放。横屏 8×4、Hotseat 和文件夹不受此钩子影响。
+- **诊断**：新增 `launcher_viewport_status`（可用高度、保留上下区域、行数和实际单元格高度）；不写入图标数据库，不重排 ItemInfo。
+- 原来的 `launcher_grid` 和 `launcher_workspace_margins` 均保持同一存储格式及兼容性。
+
+源码与 DEX 理据：[docs/WORKSPACE_VIEWPORT_1755.md](docs/WORKSPACE_VIEWPORT_1755.md)。需要真实竖屏测试确认第 1–8 行都在可用区域内。
+
+## 工作区位置与边距（参考 LiquidDock 设置交互）
+
+参考 [LiquidDock 源码](https://github.com/yu4032/LiquidDock/blob/main/src/main/kotlin/com/hellovoid/liquiddock/DeclaredSettingsPages.kt)：布局页区分**横屏 / 竖屏**，每个方向独立的三个参数分别是**水平距离偏移、顶部距离偏移、底部距离偏移**。水平偏移同时叠加左右两侧的留白，不再要求逐个填写左/右的文本框。设置操作采用 LiquidDock `IntSetting` 的交互结构：**滑块 + 可点的 dp 数值 + 数值输入对话框 + ±1 dp 微调 + 单项重置**，并提供当前方向和全部重置。
+
+参数单位 **dp**，范围与 LiquidDock 网格距离参数一致，均为 **-600～600**；全部 0 时不改变原生 Workspace 几何。修改参数后**点击「应用边距并重启桌面」才写入配置**，避免在网格加载与拖拽中途更新。系统原生 Workspace padding 与当前物理方向仍是布局计算的唯一基准，不替换 IDP 和模型加载边界，不改图标坐标或小组件跨度。
+
+配置路径仍为 `launcher_workspace_margins`，新格式为 **横屏水平/上/下，竖屏水平/上/下**（共六个整数）。兼容上一版的四参数 `left top right bottom` 文件：若未编辑，完全按旧四边值执行；首次修改采用新版对称水平距离，旧左右不对称的情况需要用户明确确认。上下与水平增量裁剪后单侧不为负，且至少保留视口 28% 的轴向空间。
+
+此功能以 17.5.5 的 `Workspace.setInsets(Rect)` 为 Hook 位置。原生方法先取得 DeviceProfile 的 Workspace Padding，再更新页间距/子布局；模块只调整**Workspace 本身的真实 Padding**，不 Hook 其他组件共用的 `l5c.h()`，不修改 Hotseat、文件夹及小组件选择面板。横竖屏分别叠加当前方向参数，配置不会在重复 `setInsets` 时累计。
+
+详细设计：[docs/WORKSPACE_MARGINS_1755.md](docs/WORKSPACE_MARGINS_1755.md)。**页面指示器 Y 在 LiquidDock 中是独立设置，这次尚未移植。**
+
 ## 修复 17.5.5 竖屏仍保持 8×4（显示方向与模型边界）
 
 在真实 17.5.5 DEX 中，`uh9.c():boolean` 只检查 `yn9.m()` 和 `i94.s(yn9.e)`，**不是**当前屏幕方向检测；`InvariantDeviceProfile.setColumnsAndRows` 仅在该特性判断为真且原始列数大于行数时才交换两轴。之前的 `effectiveWorkspaceGrid()` 错误地使用 `uh9.c` 当竖屏判断，`yn9.v(Pair)` 更是始终返回 8×4，导致横竖屏不同步。
