@@ -1,23 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="local.y700.launcher"
-    android:versionCode="1"
-    android:versionName="1.0">
-
-    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="36" />
-
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="Y700 桌面自定义"
+        android:label="OLauncherMod"
         android:hasCode="true"
         android:icon="@drawable/icon">
         <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="桌面网格与布局自定义" />
+        <meta-data android:name="xposeddescription" android:value="ColorOS 桌面网格与布局自定义" />
         <meta-data android:name="xposedminversion" android:value="93" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="Y700 桌面自定义">
+            android:label="OLauncherMod">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
