@@ -1,53 +1,32 @@
 package com.yu4032.olaunchermod;
 
-/**
- * ColorOS 17.5.5 PagedView.onMeasure() subtracts mInsets.top/bottom
- * but NOT its own top/bottom View padding from the height sent to pages.
- * In portrait that over-allocates eight CellLayout rows by the padding.
- *
- * All values are pixels, taken from the actual measured child spec and the
- * Workspace instance. Never use the full DisplayMetrics screen height.
- */
+/** Vertical bounds in DragLayer coordinates, after the Launcher lays out its siblings. */
 final class WorkspaceViewportPolicy {
     static final class Fit {
-        final int childHeight;
-        final int maxCellHeight;
-        final boolean reduced;
-        Fit(int childHeight, int maxCellHeight, boolean reduced) {
-            this.childHeight = childHeight;
-            this.maxCellHeight = maxCellHeight;
-            this.reduced = reduced;
+        final int gridTop;
+        final int gridBottom;
+        final int indicatorTop;
+
+        Fit(int gridTop, int gridBottom, int indicatorTop) {
+            this.gridTop = gridTop;
+            this.gridBottom = gridBottom;
+            this.indicatorTop = indicatorTop;
         }
     }
 
-    static Fit portraitFit(int measuredChildHeight, int topPadding,
-            int bottomPadding, int rows, int borderY, boolean portrait) {
-        if (!portrait || rows < 6 || measuredChildHeight <= 0) {
-            return new Fit(measuredChildHeight, Integer.MAX_VALUE, false);
-        }
-        int top = Math.max(0, topPadding);
-        int bottom = Math.max(0, bottomPadding);
-        // Avoid integer overflow or an invalid zero-sized LayoutParams.
-        long available = (long) measuredChildHeight - top - bottom;
-        if (available < rows) {
-            // The screen has insufficient space even for 1 pixel per row.
-            // Preserve native measurement rather than corrupting layout state.
-            return new Fit(measuredChildHeight, Integer.MAX_VALUE, false);
-        }
-        int fit = (int) available;
-        int gaps = Math.max(0, borderY);
-        long inner = available - (long) (rows - 1) * gaps;
-        if (inner < rows) {
-            // Native border gaps are too large to fit this row count.
-            gaps = (int) Math.max(0, (available - rows) / Math.max(1, rows - 1));
-            inner = available - (long) (rows - 1) * gaps;
-        }
-        int maxCell = (int) Math.max(1L, inner / rows);
-        return new Fit(fit, maxCell, fit < measuredChildHeight);
+    static Fit fit(int pageTop, int pageBottom, int statusBarBottom, int dockTop,
+            int indicatorTop, int indicatorHeight) {
+        int top = Math.max(pageTop, statusBarBottom);
+        int bottom = Math.min(pageBottom, dockTop);
+        // Keep native indicator spacing when it fits. When it extends below
+        // the Dock boundary, its entire view (including the tap target) moves.
+        int fittedIndicatorTop = indicatorHeight > 0
+                ? Math.min(indicatorTop, dockTop - indicatorHeight) : dockTop;
+        return new Fit(top, Math.min(bottom, fittedIndicatorTop), fittedIndicatorTop);
     }
 
-    static boolean fixedCellOverflows(int fixedCellHeight, int fittedCellHeight) {
-        return fixedCellHeight > 0 && fixedCellHeight > fittedCellHeight;
+    static int maxCellHeight(int pageHeight, int cellPadding, int rows, int rowGap) {
+        return (pageHeight - cellPadding - (rows - 1) * Math.max(0, rowGap)) / rows;
     }
 
     private WorkspaceViewportPolicy() {}

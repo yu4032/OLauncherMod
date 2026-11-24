@@ -9,6 +9,7 @@ import android.graphics.Point;
 import android.view.ViewGroup;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowInsets;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -337,16 +338,140 @@ public final class LauncherModule extends XposedModule {
         log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
     }
 
+    private void installPortraitViewportHook(ClassLoader loader) {
+        try {
+            Class<?> dragLayer = Class.forName("com.android.launcher3.OplusDragLayer", false, loader);
+            Class<?> workspaceClass = Class.forName("com.android.launcher3.OplusWorkspace", false, loader);
+            Class<?> workspaceBase = workspaceClass.getSuperclass();
+            Class<?> pagedView = Class.forName("com.android.launcher3.PagedView", false, loader);
+            Class<?> cellLayout = Class.forName("com.android.launcher3.CellLayout", false, loader);
+            Class<?> hotseat = Class.forName("com.android.launcher3.Hotseat", false, loader);
+            Method onLayout = HookSymbols.method(dragLayer, "onLayout", void.class, false, false,
+                    boolean.class, int.class, int.class, int.class, int.class);
+            Method getHotseat = HookSymbols.method(workspaceBase, "getHotseat",
+                    hotseat, false, false);
+            Method getIndicator = HookSymbols.method(pagedView, "getPageIndicator",
+                    View.class, false, false);
+            Method getRows = HookSymbols.method(cellLayout, "getCountY", int.class, false, false);
+            Method getCellHeight = HookSymbols.method(cellLayout, "getCellHeight",
+                    int.class, false, false);
+            java.lang.reflect.Field insetsField = HookSymbols.field(
+                    pagedView, "mInsets", Rect.class, false, false);
+            java.lang.reflect.Field borderField = HookSymbols.field(
+                    cellLayout, "mBorderSpace", Point.class, false, false);
+            java.lang.reflect.Field fixedCellHeight = HookSymbols.field(
+                    cellLayout, "mFixedCellHeight", int.class, false, false);
+            java.lang.reflect.Field fixedPageHeight = HookSymbols.field(
+                    cellLayout, "mFixedHeight", int.class, false, false);
+
+            // Workspace, Hotseat and the indicator are siblings in launcher.xml.
+            // Use their current bounds after the native layout pass so a
+            // rotation cannot reuse the preceding orientation's Dock geometry.
+            hook(onLayout).intercept(chain -> {
+                Object result = chain.proceed();
+                if (requestedColumns == 0) return result;
+                try {
+                    ViewGroup layer = (ViewGroup) chain.getThisObject();
+                    if (GridOrientation.current(layer.getContext(), 8, 4, 8, 4)[0] != 4) {
+                        return result;
+                    }
+                    ViewGroup workspace = null;
+                    for (int i = 0; i < layer.getChildCount(); i++) {
+                        View child = layer.getChildAt(i);
+                        if (workspaceClass.isInstance(child)) {
+                            workspace = (ViewGroup) child;
+                            break;
+                        }
+                    }
+                    if (workspace == null) return result;
+                    View dock = (View) getHotseat.invoke(workspace);
+                    if (dock == null || dock.getParent() != layer || dock.getHeight() <= 0
+                            || dock.getTop() <= workspace.getTop()) return result;
+
+                    View indicator = (View) getIndicator.invoke(workspace);
+                    int indicatorHeight = indicator != null && indicator.getParent() == layer
+                            && indicator.getVisibility() != View.GONE ? indicator.getHeight() : 0;
+                    Rect insets = (Rect) insetsField.get(workspace);
+                    int statusBarBottom = 0;
+                    WindowInsets windowInsets = layer.getRootWindowInsets();
+                    if (windowInsets != null && android.os.Build.VERSION.SDK_INT >= 30) {
+                        int[] location = new int[2];
+                        layer.getLocationInWindow(location);
+                        statusBarBottom = windowInsets.getInsetsIgnoringVisibility(
+                                WindowInsets.Type.statusBars() | WindowInsets.Type.displayCutout())
+                                .top - location[1];
+                    }
+                    WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.fit(
+                            workspace.getTop() + insets.top + workspace.getPaddingTop(),
+                            workspace.getBottom() - insets.bottom - workspace.getPaddingBottom(),
+                            statusBarBottom, dock.getTop(),
+                            indicatorHeight > 0 ? indicator.getTop() : dock.getTop(),
+                            indicatorHeight);
+                    int height = fit.gridBottom - fit.gridTop;
+                    int top = fit.gridTop - workspace.getTop() + workspace.getScrollY();
+                    // Defer moving the indicator until there is a page to fit.
+                    for (int i = 0; i < workspace.getChildCount(); i++) {
+                        View page = workspace.getChildAt(i);
+                        if (!isWorkspaceCell(page) || page.getVisibility() == View.GONE
+                                || page.getMeasuredWidth() <= 0) continue;
+                        int rows = (Integer) getRows.invoke(page);
+                        if (rows < 6) continue;
+                        Point border = (Point) borderField.get(page);
+                        int padding = page.getPaddingTop() + page.getPaddingBottom();
+                        int maxCellHeight = WorkspaceViewportPolicy.maxCellHeight(
+                                height, padding, rows, border.y);
+                        if (maxCellHeight < 1) continue;
+                        if (indicatorHeight > 0 && indicator.getTop() != fit.indicatorTop) {
+                            indicator.offsetTopAndBottom(fit.indicatorTop - indicator.getTop());
+                        }
+                        int cellHeight = (Integer) getCellHeight.invoke(page);
+                        if (page.getMeasuredHeight() != height || cellHeight > maxCellHeight) {
+                            int savedCellHeight = fixedCellHeight.getInt(page);
+                            int savedPageHeight = fixedPageHeight.getInt(page);
+                            // In 17.5.5, -1 triggers native cell recomputation;
+                            // zero selects the fixed-cell path too.
+                            try {
+                                fixedCellHeight.setInt(page, -1);
+                                fixedPageHeight.setInt(page, -1);
+                                page.forceLayout();
+                                page.measure(View.MeasureSpec.makeMeasureSpec(
+                                                page.getMeasuredWidth(), View.MeasureSpec.EXACTLY),
+                                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+                            } finally {
+                                fixedCellHeight.setInt(page, savedCellHeight);
+                                fixedPageHeight.setInt(page, savedPageHeight);
+                            }
+                            cellHeight = (Integer) getCellHeight.invoke(page);
+                        }
+                        page.layout(page.getLeft(), top, page.getRight(), top + height);
+                        if (i == 0) {
+                            recordViewportState(workspace.getContext(), fit, statusBarBottom,
+                                    dock.getTop(), rows, cellHeight);
+                        }
+                    }
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "workspace viewport fit failed: " + error);
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "17.5.5 portrait workspace bounds hook installed");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "workspace viewport-fit hook unavailable: " + error);
+        }
+    }
+
     private synchronized void recordViewportState(Context context,
-            int incomingHeight, int availableHeight, int rows,
-            int topPadding, int bottomPadding, int actualCellHeight) {
+            WorkspaceViewportPolicy.Fit fit, int statusBarBottom, int dockTop,
+            int rows, int cellHeight) {
         String value = "orientation=portrait\n"
-                + "paged_child_height_px=" + incomingHeight + "\n"
-                + "workspace_padding_top_px=" + topPadding + "\n"
-                + "workspace_padding_bottom_px=" + bottomPadding + "\n"
-                + "remaining_grid_height_px=" + availableHeight + "\n"
+                + "status_bar_bottom_px=" + statusBarBottom + "\n"
+                + "dock_top_px=" + dockTop + "\n"
+                + "indicator_top_px=" + fit.indicatorTop + "\n"
+                + "grid_top_px=" + fit.gridTop + "\n"
+                + "grid_bottom_px=" + fit.gridBottom + "\n"
+                + "remaining_grid_height_px=" + (fit.gridBottom - fit.gridTop) + "\n"
                 + "rows=" + rows + "\n"
-                + "actual_cell_height_px=" + actualCellHeight + "\n";
+                + "actual_cell_height_px=" + cellHeight + "\n";
         if (value.equals(lastViewportReport)) return;
         lastViewportReport = value;
         try {
@@ -935,89 +1060,7 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "workspace padding customization hook failed: " + error);
         }
 
-        // ColorOS 17.5.5 PagedView.onMeasure subtracts the OS mInsets
-        // but *not* Workspace's top/bottom padding from child MeasureSpecs.
-        // With portrait 4x8, native pages can still be measured as if the
-        // icon grid occupied the full screen, overflowing the reserved
-        // status/search area and Hotseat. Fit the PAGE before native measures
-        // cells, not by scaling already-laid-out icons or modifying DB rows.
-        try {
-            Class<?> page = Class.forName(
-                    "com.android.launcher3.OplusCellLayout", false, loader);
-            Class<?> base = Class.forName(
-                    "com.android.launcher3.CellLayout", false, loader);
-            Method onMeasure = HookSymbols.method(page, "onMeasure",
-                    void.class, false, false, int.class, int.class);
-            Method getWorkspace = HookSymbols.method(base, "getWorkspace",
-                    Class.forName("com.android.launcher3.Workspace", false, loader),
-                    false, false);
-            java.lang.reflect.Field borderField = HookSymbols.field(
-                    base, "mBorderSpace", Point.class, false, false);
-            java.lang.reflect.Field fixedHeight = HookSymbols.field(
-                    base, "mFixedCellHeight", int.class, false, false);
-            java.lang.reflect.Field fixedWidth = HookSymbols.field(
-                    base, "mFixedCellWidth", int.class, false, false);
-            hook(onMeasure).intercept(chain -> {
-                Object cell = chain.getThisObject();
-                if (!isWorkspaceCell(cell) || requestedColumns == 0) {
-                    return chain.proceed();
-                }
-                int widthSpec = (Integer) chain.getArgs().get(0);
-                int heightSpec = (Integer) chain.getArgs().get(1);
-                WorkspaceViewportPolicy.Fit fit = null;
-                Context reportContext = null;
-                int rows = 0, top = 0, bottom = 0, incomingHeight = 0;
-                try {
-                    ViewGroup workspace = (ViewGroup) getWorkspace.invoke(cell);
-                    rows = integer(cell, "getCountY");
-                    if (workspace != null && rows >= 6
-                            && View.MeasureSpec.getMode(heightSpec) == View.MeasureSpec.EXACTLY) {
-                        int[] axes = effectiveWorkspaceGrid(workspace.getContext(), 0, 0);
-                        if (axes[0] < axes[1]) {
-                            Point borders = (Point) borderField.get(cell);
-                            int borderY = borders == null ? 0 : borders.y;
-                            incomingHeight = View.MeasureSpec.getSize(heightSpec);
-                            top = workspace.getPaddingTop();
-                            bottom = workspace.getPaddingBottom();
-                            fit = WorkspaceViewportPolicy.portraitFit(
-                                    incomingHeight, top, bottom, rows, borderY, true);
-                            int storedFixedHeight = fixedHeight.getInt(cell);
-                            if (WorkspaceViewportPolicy.fixedCellOverflows(
-                                    storedFixedHeight, fit.maxCellHeight)) {
-                                // A stale fixed 4-row height prevents the
-                                // 8-row native measurement from recalculating.
-                                fixedHeight.setInt(cell, 0);
-                                fixedWidth.setInt(cell, 0);
-                            }
-                            reportContext = workspace.getContext();
-                        }
-                    }
-                } catch (Throwable error) {
-                    log(Log.ERROR, TAG, "workspace viewport preparation failed: " + error);
-                    fit = null;
-                }
-                // Proceed exactly once, even if native measure or reporting throws.
-                boolean reduced = fit != null && fit.reduced;
-                Object result = reduced
-                        ? chain.proceed(new Object[]{widthSpec,
-                                View.MeasureSpec.makeMeasureSpec(
-                                        fit.childHeight, View.MeasureSpec.EXACTLY)})
-                        : chain.proceed();
-                if (reduced && reportContext != null) {
-                    try {
-                        recordViewportState(reportContext, incomingHeight,
-                                fit.childHeight, rows, top, bottom,
-                                integer(cell, "getCellHeight"));
-                    } catch (Throwable error) {
-                        log(Log.WARN, TAG, "workspace viewport report failed: " + error);
-                    }
-                }
-                return result;
-            });
-            log(Log.INFO, TAG, "17.5.5 workspace portrait viewport-fit installed");
-        } catch (Throwable error) {
-            log(Log.ERROR, TAG, "workspace viewport-fit hook unavailable: " + error);
-        }
+        installPortraitViewportHook(loader);
 
         // Workspace pages are initialized from the IDP inside CellLayout's
         // constructor. Correct the actual grid after OplusCellLayout is ready,

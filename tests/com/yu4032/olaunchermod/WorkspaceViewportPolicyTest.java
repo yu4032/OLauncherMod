@@ -4,60 +4,56 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class WorkspaceViewportPolicyTest {
-    @Test public void portraitEightRowsFitRemainingHeight() {
-        WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
-                1600, 150, 250, 8, 6, true);
-        assertEquals(1200, fit.childHeight);
-        assertEquals(144, fit.maxCellHeight);
-        assertTrue(fit.reduced);
+    @Test public void statusBarAndDockBoundTheGridWithoutWorkspacePadding() {
+        WorkspaceViewportPolicy.Fit fit =
+                WorkspaceViewportPolicy.fit(0, 1600, 100, 1350, 1350, 0);
+        assertEquals(100, fit.gridTop);
+        assertEquals(1350, fit.gridBottom);
     }
 
-    @Test public void landscapePreservesValidatedGrid() {
-        WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
-                800, 130, 130, 4, 8, false);
-        assertEquals(800, fit.childHeight);
-        assertFalse(fit.reduced);
+    @Test public void movesIndicatorEntirelyAboveDockAndFitsEightRows() {
+        WorkspaceViewportPolicy.Fit fit =
+                WorkspaceViewportPolicy.fit(0, 1600, 100, 1350, 1390, 40);
+        assertEquals(1310, fit.indicatorTop);
+        assertEquals(fit.indicatorTop, fit.gridBottom);
+        int height = fit.gridBottom - fit.gridTop;
+        int cellHeight = WorkspaceViewportPolicy.maxCellHeight(height, 8, 8, 6);
+        assertEquals(145, cellHeight);
+        assertTrue(8 * cellHeight + 7 * 6 + 8 <= height);
     }
 
-    @Test public void portraitRecomputesEveryMeasurement() {
-        WorkspaceViewportPolicy.Fit first = WorkspaceViewportPolicy.portraitFit(
-                1600, 150, 250, 8, 0, true);
-        WorkspaceViewportPolicy.Fit second = WorkspaceViewportPolicy.portraitFit(
-                1600, 180, 300, 8, 0, true);
-        assertEquals(1200, first.childHeight);
-        assertEquals(1120, second.childHeight);
-        assertEquals(140, second.maxCellHeight);
+    @Test public void clampsIndicatorThatOnlyPartlyOverlapsDock() {
+        assertEquals(1310, WorkspaceViewportPolicy.fit(
+                0, 1600, 100, 1350, 1340, 40).indicatorTop);
     }
 
-    @Test public void zeroAndNegativePaddingDoNotReduce() {
-        assertEquals(1500, WorkspaceViewportPolicy.portraitFit(
-                1500, -20, 0, 8, 0, true).childHeight);
-        assertFalse(WorkspaceViewportPolicy.portraitFit(
-                1500, 0, 0, 8, 0, true).reduced);
+    @Test public void preservesIndicatorWhenAlreadyAboveDock() {
+        WorkspaceViewportPolicy.Fit fit =
+                WorkspaceViewportPolicy.fit(0, 1600, 100, 1350, 1280, 40);
+        assertEquals(1280, fit.indicatorTop);
+        assertEquals(1280, fit.gridBottom);
     }
 
-    @Test public void extremePaddingDoesNotBreakMeasurements() {
-        WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
-                500, 300, 300, 8, 10, true);
-        assertEquals(500, fit.childHeight);
-        assertFalse(fit.reduced);
+    @Test public void honorsCustomWorkspaceMarginsInsidePhysicalBounds() {
+        WorkspaceViewportPolicy.Fit fit =
+                WorkspaceViewportPolicy.fit(145, 1160, 100, 1350, 1280, 40);
+        assertEquals(145, fit.gridTop);
+        assertEquals(1160, fit.gridBottom);
+        assertEquals(1280, fit.indicatorTop);
     }
 
-    @Test public void largeNativeBorderSpacingIsBounded() {
-        WorkspaceViewportPolicy.Fit fit = WorkspaceViewportPolicy.portraitFit(
-                800, 100, 100, 8, 200, true);
-        assertEquals(600, fit.childHeight);
-        assertTrue(fit.maxCellHeight >= 1);
+    @Test public void recomputesFromDockAndStatusBarAfterRotation() {
+        WorkspaceViewportPolicy.Fit first =
+                WorkspaceViewportPolicy.fit(0, 1920, 72, 1680, 1740, 40);
+        WorkspaceViewportPolicy.Fit second =
+                WorkspaceViewportPolicy.fit(0, 1920, 84, 1610, 1740, 40);
+        assertEquals(72, first.gridTop);
+        assertEquals(1640, first.gridBottom);
+        assertEquals(84, second.gridTop);
+        assertEquals(1570, second.gridBottom);
     }
 
-    @Test public void fixedCellIsReleasedOnlyWhenTooTall() {
-        assertTrue(WorkspaceViewportPolicy.fixedCellOverflows(175, 140));
-        assertFalse(WorkspaceViewportPolicy.fixedCellOverflows(120, 140));
-        assertFalse(WorkspaceViewportPolicy.fixedCellOverflows(0, 140));
-    }
-
-    @Test public void noChangesToFourRowPortraitBase() {
-        assertEquals(1400, WorkspaceViewportPolicy.portraitFit(
-                1400, 100, 100, 4, 0, true).childHeight);
+    @Test public void reportsInfeasibleGapSizeWithoutInventingSmallerNativeGaps() {
+        assertTrue(WorkspaceViewportPolicy.maxCellHeight(100, 8, 8, 40) < 1);
     }
 }
