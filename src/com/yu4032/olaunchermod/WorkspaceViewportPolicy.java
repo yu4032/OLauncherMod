@@ -29,5 +29,10 @@ final class WorkspaceViewportPolicy {
         return (pageHeight - cellPadding - (rows - 1) * Math.max(0, rowGap)) / rows;
     }
 
+    static int folderTitleOffset(int previewBottom, int textTop, int textBottom,
+            int folderBottom, int gap) {
+        return Math.max(0, Math.min(previewBottom + gap - textTop, folderBottom - textBottom));
+    }
+
     private WorkspaceViewportPolicy() {}
 }

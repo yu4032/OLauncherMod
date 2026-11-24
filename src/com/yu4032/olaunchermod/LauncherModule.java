@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Point;
 import android.view.ViewGroup;
@@ -15,6 +16,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.ViewTreeObserver;
+import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -54,6 +56,7 @@ public final class LauncherModule extends XposedModule {
     private volatile String lastGridReport = "";
     private volatile String lastLoaderBoundsReport = "";
     private volatile boolean freeModeQueryObserved;
+    private final ThreadLocal<Boolean> checkingStoredWorkspaceCells = new ThreadLocal<>();
     private final ThreadLocal<Boolean> migrationResetPending = new ThreadLocal<>();
 
     private synchronized void refresh() {
@@ -320,7 +323,7 @@ public final class LauncherModule extends XposedModule {
     /**
      * Record the actual boundary given to the ColorOS model loader. Unlike
      * CellLayout.getCountX(), this determines whether a saved row will survive
-     * OplusLoaderCursor.checkItemPlacement() and the FindSpaceHelper passes.
+     * OplusLoaderCursor.checkItemPlacement().
      */
     private synchronized void recordLoaderBounds(ClassLoader loader,
             Object nativeBounds, int finalColumns, int finalRows) {
@@ -603,8 +606,53 @@ public final class LauncherModule extends XposedModule {
                 return result;
             });
             log(Log.INFO, TAG, "17.5.5 portrait workspace bounds hooks installed");
+            installPortraitFolderTitleHook(loader, viewports);
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "workspace viewport-fit hook unavailable: " + error);
+        }
+    }
+
+    private void installPortraitFolderTitleHook(ClassLoader loader,
+            java.util.Map<View, PortraitViewport> viewports) {
+        try {
+            Class<?> folderClass = Class.forName(
+                    "com.android.launcher3.folder.FlexibleFolderIcon", false, loader);
+            Class<?> bubbleText = Class.forName("com.android.launcher3.BubbleTextView", false, loader);
+            Method layout = HookSymbols.method(folderClass, "onLayout", void.class, false, false,
+                    boolean.class, int.class, int.class, int.class, int.class);
+            Method getPreview = HookSymbols.method(folderClass, "getItemIconPreview",
+                    View.class, false, false);
+            Method getTitle = HookSymbols.method(folderClass, "getFolderName", bubbleText, false, false);
+            hook(layout).intercept(chain -> {
+                Object result = chain.proceed();
+                View folder = (View) chain.getThisObject();
+                if (!(folder.getParent() instanceof ViewGroup items)
+                        || !(items.getParent() instanceof View page)
+                        || !(page.getParent() instanceof View workspace)) return result;
+                PortraitViewport viewport = viewports.get(workspace.getParent());
+                if (viewport == null || !viewport.itemGrids.containsKey(items)) return result;
+                try {
+                    View preview = (View) getPreview.invoke(folder);
+                    TextView title = (TextView) getTitle.invoke(folder);
+                    if (preview == null || preview.getHeight() <= 0 || title == null
+                            || title.getVisibility() != View.VISIBLE || title.getBaseline() < 0) {
+                        return result;
+                    }
+                    int baseline = title.getTop() + title.getBaseline();
+                    Paint.FontMetricsInt font = title.getPaint().getFontMetricsInt();
+                    int gap = Math.round(4 * folder.getResources().getDisplayMetrics().density);
+                    int offset = WorkspaceViewportPolicy.folderTitleOffset(preview.getBottom(),
+                            baseline + font.ascent, baseline + font.descent, folder.getHeight(), gap);
+                    // Move the native title and its touch bounds in the same layout pass.
+                    if (offset > 0) title.offsetTopAndBottom(offset);
+                } catch (ReflectiveOperationException error) {
+                    log(Log.WARN, TAG, "portrait folder title adjustment failed: " + error);
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "17.5.5 portrait folder title hook installed");
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            log(Log.WARN, TAG, "portrait folder title hook unavailable: " + error);
         }
     }
 
@@ -920,42 +968,50 @@ public final class LauncherModule extends XposedModule {
                     + error);
         }
 
-        // Observe placement failures; never bypass validation or suppress
-        // unrelated database deletions. A real collision must still be rejected.
+        // LoaderCursor reads cellX/cellY directly from the DB before the
+        // Launcher applies vCellX/vCellY for portrait binding. Keep native
+        // occupancy in the same coordinate system as the saved cells.
         try {
             Class<?> cursor = Class.forName(
                     "com.android.launcher3.model.OplusLoaderCursor", false, loader);
             Class<?> itemClass = Class.forName(
                     "com.android.launcher3.model.data.ItemInfo", false, loader);
+            java.lang.reflect.Field container = itemClass.getField("container");
             Class<?> screens = Class.forName(
                     "com.android.launcher3.util.IntArray", false, loader);
             Method placement = HookSymbols.method(cursor, "checkItemPlacement",
                     boolean.class, false, false, itemClass, screens);
             hook(placement).intercept(chain -> {
-                Object result = chain.proceed();
-                if (Boolean.FALSE.equals(result) && requestedColumns > 0) {
-                    Object item = chain.getArgs().get(0);
+                Object item = chain.getArgs().get(0);
+                if (requestedColumns <= 0 || requestedRows <= 0 || item == null
+                        || container.getInt(item) != -100) return chain.proceed();
+                boolean wasChecking = Boolean.TRUE.equals(checkingStoredWorkspaceCells.get());
+                checkingStoredWorkspaceCells.set(true);
+                Object result;
+                try {
+                    result = chain.proceed();
+                } finally {
+                    if (!wasChecking) checkingStoredWorkspaceCells.remove();
+                }
+                if (Boolean.FALSE.equals(result)) {
                     try {
-                        int container = itemClass.getField("container").getInt(item);
-                        if (container == -100) {
-                            int x = integer(item, "getCellX");
-                            int y = integer(item, "getCellY");
-                            int w = integer(item, "getSpanX");
-                            int h = integer(item, "getSpanY");
-                            log(Log.ERROR, TAG, "workspace loader rejected position "
-                                    + x + "," + y + " span " + w + "x" + h
-                                    + "; configured landscape "
-                                    + requestedColumns + "x" + requestedRows);
-                        }
+                        int x = integer(item, "getCellX");
+                        int y = integer(item, "getCellY");
+                        int w = integer(item, "getSpanX");
+                        int h = integer(item, "getSpanY");
+                        log(Log.ERROR, TAG, "workspace loader rejected position "
+                                + x + "," + y + " span " + w + "x" + h
+                                + "; configured landscape "
+                                + requestedColumns + "x" + requestedRows);
                     } catch (Throwable error) {
                         log(Log.WARN, TAG, "workspace placement failure: " + error);
                     }
                 }
                 return result;
             });
-            log(Log.INFO, TAG, "workspace loader diagnostics installed");
+            log(Log.INFO, TAG, "stored workspace placement scope installed");
         } catch (Throwable error) {
-            log(Log.ERROR, TAG, "workspace loader diagnostics hook failed: " + error);
+            log(Log.ERROR, TAG, "stored workspace placement scope unavailable: " + error);
         }
 
         // Prevent the OS12 compatibility converter from rewriting an explicit
@@ -1120,9 +1176,8 @@ public final class LauncherModule extends XposedModule {
         // its input IDP values and never calls p5.c.a(0), so patching only
         // p5.c.a(0) does not protect columns 7 and 8 from model trimming.
         //
-        // The same method is used by LoaderCursor and FindSpaceHelper.
-        // It must return the canonical LANDSCAPE workspace dimensions: the
-        // paired another-cell (portrait) coordinates use p5.c.a(1) instead.
+        // This helper also serves callers that operate in display coordinates.
+        // Report the canonical grid only while validating saved workspace cells.
         try {
             Class<?> helperClass = HookSymbols.classByAnyName(loader,
                     "yn9", "j5.i");
@@ -1143,13 +1198,14 @@ public final class LauncherModule extends XposedModule {
                             .invoke(nativeResult)).intValue();
                     int nativeY = ((Number) pairClass.getMethod("d")
                             .invoke(nativeResult)).intValue();
-                    int[] physical = effectiveWorkspaceGrid(
-                            launcherContext(loader), nativeX, nativeY);
+                    boolean stored = Boolean.TRUE.equals(checkingStoredWorkspaceCells.get());
+                    int[] bounds = stored
+                            ? GridIntegrity.canonicalLoaderBounds(
+                                    requestedColumns, requestedRows, nativeX, nativeY)
+                            : effectiveWorkspaceGrid(launcherContext(loader), nativeX, nativeY);
                     Object result = pairConstructor.newInstance(
-                            Integer.valueOf(physical[0]),
-                            Integer.valueOf(physical[1]));
-                    recordLoaderBounds(loader, nativeResult,
-                            physical[0], physical[1]);
+                            Integer.valueOf(bounds[0]), Integer.valueOf(bounds[1]));
+                    if (stored) recordLoaderBounds(loader, nativeResult, bounds[0], bounds[1]);
                     return result;
                 } catch (Throwable error) {
                     log(Log.ERROR, TAG, "final loader bounds override failed: " + error);
