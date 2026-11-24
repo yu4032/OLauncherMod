@@ -15,9 +15,9 @@
 
 ## 修复策略
 
-- `launcher.xml` 中，`OplusWorkspace`、`OplusHotseat` 和 `OplusPageIndicator` 是 DragLayer 的直接子 View。竖屏下在 `OplusDragLayer.onLayout` 的原生布局完成后，以同一坐标系读取当次 Dock 和工作区边界，避免旋转时取到旧 Dock 高度。
-- 网格上缘取工作区上缘（含原生 Insets 与设置的 Padding）和状态栏／刘海下缘中的较大值。网格下缘取工作区下缘、Dock 上缘和可用指示器上缘中的较小值。指示器压到 Dock 时，将整个 View 移至 Dock 上方。
-- 只对自定义网格中实际属于 Workspace 的竖屏页面（至少 6 行）应用这段范围。按范围重新测量页面，原生 CellLayout 会按当前行数、内边距和行距计算单元格。测量期间临时清除固定高度，测量结束后恢复固定字段。
+- `launcher.xml` 中，`OplusWorkspace`、`OplusHotseat` 和 `OplusPageIndicator` 是 DragLayer 的直接子 View。竖屏下在 `OplusDragLayer.onLayout` 安排的一次性绘制前回调中，以同一坐标系读取当次 Dock 和工作区边界，避免旋转时取到旧 Dock 高度。
+- 网格上缘取工作区上缘（含原生 Insets 与设置的 Padding）和状态栏／刘海下缘中的较大值。网格下缘取工作区下缘、Dock 上缘和可用指示器上缘中的较小值。指示器距 Dock 不足 8dp 时，将整个 View 上移并留出 8dp。
+- 只对自定义网格中实际属于 Workspace 的竖屏页面（至少 6 行）应用这段范围。当范围变化且页面尚未适配时，在显示该帧前请求一次原生测量。CellLayout 按当前行数、内边距和行距计算单元格，并在测量子项前同步大文件夹与卡片的尺寸配置。绘制前回调只按需偏移页面位置。
 - `launcher_viewport_status` 记录状态栏下缘、Dock 上缘、指示器上缘、网格上下缘、行数及实际单元格高度。坐标均以 DragLayer 为原点。
 
 ## Compose UI

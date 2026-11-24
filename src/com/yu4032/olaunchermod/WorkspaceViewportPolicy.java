@@ -15,13 +15,13 @@ final class WorkspaceViewportPolicy {
     }
 
     static Fit fit(int pageTop, int pageBottom, int statusBarBottom, int dockTop,
-            int indicatorTop, int indicatorHeight) {
+            int indicatorTop, int indicatorHeight, int indicatorGap) {
         int top = Math.max(pageTop, statusBarBottom);
         int bottom = Math.min(pageBottom, dockTop);
         // Keep native indicator spacing when it fits. When it extends below
         // the Dock boundary, its entire view (including the tap target) moves.
         int fittedIndicatorTop = indicatorHeight > 0
-                ? Math.min(indicatorTop, dockTop - indicatorHeight) : dockTop;
+                ? Math.min(indicatorTop, dockTop - indicatorHeight - indicatorGap) : dockTop;
         return new Fit(top, Math.min(bottom, fittedIndicatorTop), fittedIndicatorTop);
     }
 
