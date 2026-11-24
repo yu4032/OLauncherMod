@@ -339,7 +339,11 @@ public final class LauncherModule extends XposedModule {
         log(Log.INFO, TAG, "loader grid bounds: " + value.replace('\n', ' '));
     }
 
+    private record PortraitGrid(int cellWidth, int cellHeight, int columns, int rows,
+            int columnGap, int rowGap) {}
+
     private static final class PortraitViewport {
+        final java.util.WeakHashMap<ViewGroup, PortraitGrid> itemGrids = new java.util.WeakHashMap<>();
         int height;
         int width;
         int layerHeight;
@@ -353,6 +357,10 @@ public final class LauncherModule extends XposedModule {
             Class<?> pagedView = Class.forName("com.android.launcher3.PagedView", false, loader);
             Class<?> pageClass = Class.forName("com.android.launcher3.OplusCellLayout", false, loader);
             Class<?> cellLayout = Class.forName("com.android.launcher3.CellLayout", false, loader);
+            Class<?> itemsClass = Class.forName(
+                    "com.android.launcher3.ShortcutAndWidgetContainer", false, loader);
+            Class<?> itemParamsClass = Class.forName(
+                    "com.android.launcher3.celllayout.CellLayoutLayoutParams", false, loader);
             Class<?> hotseat = Class.forName("com.android.launcher3.Hotseat", false, loader);
             Class<?> activityContext = Class.forName(
                     "com.android.launcher3.views.ActivityContext", false, loader);
@@ -363,6 +371,14 @@ public final class LauncherModule extends XposedModule {
                     int.class, int.class);
             Method onMeasure = HookSymbols.method(pageClass, "onMeasure", void.class, false, false,
                     int.class, int.class);
+            Method getItems = HookSymbols.method(cellLayout, "getShortcutsAndWidgets",
+                    itemsClass, false, false);
+            Method setItemCellDimensions = HookSymbols.method(itemsClass, "setCellDimensions",
+                    void.class, false, false, int.class, int.class, int.class, int.class, Point.class);
+            Method setupItemLayout = HookSymbols.method(itemsClass, "setupLp", void.class,
+                    false, false, View.class);
+            Method placementDirty = HookSymbols.method(cellLayout, "isItemPlacementDirty",
+                    boolean.class, false, false);
             Method getHotseat = HookSymbols.method(workspaceClass.getSuperclass(), "getHotseat",
                     hotseat, false, false);
             Method getIndicator = HookSymbols.method(pagedView, "getPageIndicator",
@@ -386,6 +402,10 @@ public final class LauncherModule extends XposedModule {
                     cellLayout, "mFixedCellHeight", int.class, false, false);
             java.lang.reflect.Field fixedPageHeight = HookSymbols.field(
                     cellLayout, "mFixedHeight", int.class, false, false);
+            java.lang.reflect.Field dragging = HookSymbols.field(
+                    cellLayout, "mDragging", boolean.class, false, false);
+            java.lang.reflect.Field lockedToGrid = HookSymbols.field(
+                    itemParamsClass, "isLockedToGrid", boolean.class, false, false);
 
             // Both hooks and the pre-draw callback run on the Launcher UI thread.
             java.util.WeakHashMap<View, PortraitViewport> viewports = new java.util.WeakHashMap<>();
@@ -434,6 +454,39 @@ public final class LauncherModule extends XposedModule {
                     }
                 } catch (ReflectiveOperationException error) {
                     log(Log.WARN, TAG, "workspace folder sizing failed: " + error);
+                }
+                try {
+                    ViewGroup items = (ViewGroup) getItems.invoke(page);
+                    // ColorOS measures bound children from cached LayoutParams.
+                    // Rebuild those with the fitted grid before native child measurement.
+                    setItemCellDimensions.invoke(items, cellWidth, cellHeight, columns, rows, border);
+                    PortraitGrid grid = new PortraitGrid(cellWidth, cellHeight, columns, rows,
+                            border.x, border.y);
+                    if (!grid.equals(viewport.itemGrids.get(items))
+                            && !dragging.getBoolean(page)
+                            && !Boolean.TRUE.equals(placementDirty.invoke(page))) {
+                        for (int i = 0; i < items.getChildCount(); i++) {
+                            View item = items.getChildAt(i);
+                            ViewGroup.LayoutParams params = item.getLayoutParams();
+                            if (item.getVisibility() == View.GONE || !itemParamsClass.isInstance(params)) {
+                                continue;
+                            }
+                            // Native rotation leaves these unlocked after positioning.
+                            // setupLp skips unlocked children, so enable it for this call.
+                            boolean locked = lockedToGrid.getBoolean(params);
+                            try {
+                                lockedToGrid.setBoolean(params, true);
+                                setupItemLayout.invoke(items, item);
+                            } finally {
+                                lockedToGrid.setBoolean(params, locked);
+                            }
+                        }
+                        items.forceLayout();
+                        viewport.itemGrids.put(items, grid);
+                    }
+                } catch (ReflectiveOperationException error) {
+                    log(Log.WARN, TAG, "workspace item layout refresh failed: " + error
+                            + ", cause=" + error.getCause());
                 }
                 try {
                     fixedCellHeight.setInt(page, -1);
