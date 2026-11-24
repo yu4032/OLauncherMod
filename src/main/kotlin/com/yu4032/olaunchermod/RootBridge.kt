@@ -8,6 +8,7 @@ internal object RootBridge {
     const val DIR = "/storage/emulated/0/Android/data/com.android.launcher/files"
     const val GRID = "$DIR/launcher_grid"
     const val MARGINS = "$DIR/launcher_workspace_margins"
+    private const val INDICATOR = "$DIR/${IndicatorActivityConfig.FILE_NAME}"
 
     data class Result(val ok: Boolean, val text: String)
 
@@ -34,6 +35,23 @@ internal object RootBridge {
     }
 
     suspend fun read(path: String): String = readChecked(path).orEmpty()
+
+    suspend fun readIndicatorActivity(): IndicatorActivityConfig? =
+        readChecked(INDICATOR)?.let(IndicatorActivityConfig::parse)
+
+    suspend fun saveIndicatorActivity(config: IndicatorActivityConfig): Boolean =
+        withContext(Dispatchers.IO) {
+            val content = config.serialize()
+            execute("""
+                mkdir -p '$DIR' &&
+                temp=${'$'}(mktemp '$DIR/.${IndicatorActivityConfig.FILE_NAME}.XXXXXX') &&
+                trap 'rm -f "${'$'}temp"' EXIT &&
+                printf '%s\n' '$content' > "${'$'}temp" &&
+                chmod 644 "${'$'}temp" &&
+                mv -f "${'$'}temp" '$INDICATOR' &&
+                am force-stop com.android.launcher
+            """.trimIndent()).ok
+        }
 
     suspend fun saveGrid(columns: Int, rows: Int, keepEmpty: Boolean): Boolean =
         withContext(Dispatchers.IO) {

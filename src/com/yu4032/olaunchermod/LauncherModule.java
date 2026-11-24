@@ -1,7 +1,11 @@
 package com.yu4032.olaunchermod;
 
+import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Rect;
@@ -33,11 +37,14 @@ public final class LauncherModule extends XposedModule {
     private static final String OPLUS_PREFS = "com.android.launcher_unique_shared_prefs";
     private static final String MARGINS_FILE =
             "/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins";
+    private static final File INDICATOR_FILE =
+            new File(new File(CONFIG_FILE).getParentFile(), IndicatorActivityConfig.FILE_NAME);
 
     private volatile int requestedColumns;
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
     private volatile WorkspaceMarginConfig workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+    private volatile IndicatorActivityConfig indicatorActivity = IndicatorActivityConfig.DEFAULT;
     private volatile String lastMarginReport = "";
     private volatile String lastViewportReport = "";
     // A layout change requires a fresh Launcher process, never a mid-drag
@@ -52,6 +59,13 @@ public final class LauncherModule extends XposedModule {
     private synchronized void refresh() {
         if (configInitialized) return;
         configInitialized = true;
+        try (BufferedReader reader = new BufferedReader(new FileReader(INDICATOR_FILE))) {
+            indicatorActivity = IndicatorActivityConfig.parse(reader.readLine());
+        } catch (java.io.FileNotFoundException ignored) {
+            // Use the stock indicator when the user has not configured a target.
+        } catch (java.io.IOException error) {
+            log(Log.WARN, TAG, "indicator activity configuration read failed: " + error);
+        }
         // Independent of launcher_grid: users may adjust native margins
         // without enabling a custom grid.
         try (BufferedReader margins = new BufferedReader(new FileReader(MARGINS_FILE))) {
@@ -718,6 +732,7 @@ public final class LauncherModule extends XposedModule {
         // Diagnostics only: each hook below resolves and fails independently.
         // The previous global early-return disabled a working workspace grid.
         if (requestedColumns > 0) preflightVisualGridSymbols(loader);
+        installIndicatorActivityHook(loader);
 
         try {
             Class<?> idp = Class.forName(
@@ -1429,6 +1444,48 @@ public final class LauncherModule extends XposedModule {
             log(Log.INFO, TAG, "secondary non-preview expansion guard installed");
         } catch (Throwable error) {
             log(Log.WARN, TAG, "secondary migration overload unavailable: " + error);
+        }
+    }
+
+    private void installIndicatorActivityHook(ClassLoader loader) {
+        if (!indicatorActivity.enabled()) return;
+        try {
+            Class<?> entry = Class.forName("com.android.launcher3.search.IndicatorEntry", false, loader);
+            Class<?> launcher = Class.forName("com.android.launcher.Launcher", false, loader);
+            Method start = HookSymbols.method(entry, "doRealStartIndicatorApp", boolean.class,
+                    false, false, Intent.class);
+            java.lang.reflect.Field launcherField = HookSymbols.field(
+                    entry, "mLauncher", launcher, false, false);
+            hook(start).intercept(chain -> {
+                Intent original = (Intent) chain.getArgs().get(0);
+                String target = original == null ? null
+                        : indicatorActivity.targetFor(original.getAction(), original.getPackage());
+                if (target == null) return chain.proceed();
+                ComponentName component = ComponentName.unflattenFromString(target);
+                if (component == null) return chain.proceed();
+                try {
+                    Context launcherContext = (Context) launcherField.get(chain.getThisObject());
+                    Context context = launcherContext.getApplicationContext();
+                    PackageManager pm = context.getPackageManager();
+                    pm.getActivityInfo(component, 0);
+                    Intent main = Intent.makeMainActivity(component);
+                    Intent query = new Intent(Intent.ACTION_MAIN)
+                            .addCategory(Intent.CATEGORY_LAUNCHER).setPackage(component.getPackageName());
+                    boolean isLauncherActivity = pm.queryIntentActivities(query, 0)
+                            .stream().anyMatch(match -> component.getClassName().equals(match.activityInfo.name));
+                    Intent intent = isLauncherActivity ? main : new Intent().setComponent(component);
+                    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    return true;
+                } catch (PackageManager.NameNotFoundException | ActivityNotFoundException
+                        | SecurityException | IllegalAccessException error) {
+                    log(Log.WARN, TAG, "indicator target unavailable: " + component.flattenToShortString()
+                            + ", " + error);
+                    return chain.proceed();
+                }
+            });
+            log(Log.INFO, TAG, "custom indicator activity hook installed");
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "custom indicator activity hook unavailable: " + error);
         }
     }
 }
