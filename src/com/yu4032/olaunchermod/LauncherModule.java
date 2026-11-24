@@ -1523,21 +1523,25 @@ public final class LauncherModule extends XposedModule {
                     Context launcherContext = (Context) launcherField.get(chain.getThisObject());
                     Context context = launcherContext.getApplicationContext();
                     PackageManager pm = context.getPackageManager();
-                    pm.getActivityInfo(component, 0);
-                    Intent main = Intent.makeMainActivity(component);
-                    Intent query = new Intent(Intent.ACTION_MAIN)
-                            .addCategory(Intent.CATEGORY_LAUNCHER).setPackage(component.getPackageName());
-                    boolean isLauncherActivity = pm.queryIntentActivities(query, 0)
-                            .stream().anyMatch(match -> component.getClassName().equals(match.activityInfo.name));
-                    Intent intent = isLauncherActivity ? main : new Intent().setComponent(component);
-                    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                    return true;
+                    if (pm.getActivityInfo(component, 0).exported) {
+                        Intent query = new Intent(Intent.ACTION_MAIN)
+                                .addCategory(Intent.CATEGORY_LAUNCHER).setPackage(component.getPackageName());
+                        boolean isLauncherActivity = pm.queryIntentActivities(query, 0)
+                                .stream().anyMatch(match -> component.getClassName().equals(match.activityInfo.name));
+                        Intent intent = isLauncherActivity
+                                ? Intent.makeMainActivity(component) : new Intent().setComponent(component);
+                        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                        return true;
+                    } else {
+                        log(Log.WARN, TAG, "indicator target is no longer exported: "
+                                + component.flattenToShortString());
+                    }
                 } catch (PackageManager.NameNotFoundException | ActivityNotFoundException
                         | SecurityException | IllegalAccessException error) {
                     log(Log.WARN, TAG, "indicator target unavailable: " + component.flattenToShortString()
                             + ", " + error);
-                    return chain.proceed();
                 }
+                return chain.proceed();
             });
             log(Log.INFO, TAG, "custom indicator activity hook installed");
         } catch (Throwable error) {
