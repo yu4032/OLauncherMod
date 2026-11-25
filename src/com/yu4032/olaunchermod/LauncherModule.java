@@ -5,6 +5,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
@@ -18,9 +19,7 @@ import android.view.WindowInsets;
 import android.view.ViewTreeObserver;
 import android.widget.TextView;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.Objects;
@@ -34,14 +33,9 @@ import io.github.libxposed.api.XposedModuleInterface;
  */
 public final class LauncherModule extends XposedModule {
     private static final String TAG = "OLauncherMod";
-    private static final String CONFIG_FILE =
-            "/storage/emulated/0/Android/data/com.android.launcher/files/launcher_grid";
     private static final String OPLUS_PREFS = "com.android.launcher_unique_shared_prefs";
-    private static final String MARGINS_FILE =
-            "/storage/emulated/0/Android/data/com.android.launcher/files/launcher_workspace_margins";
-    private static final File INDICATOR_FILE =
-            new File(new File(CONFIG_FILE).getParentFile(), IndicatorActivityConfig.FILE_NAME);
 
+    private volatile ModuleConfigStore configStore = ModuleConfigStore.defaults();
     private volatile int requestedColumns;
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
@@ -51,7 +45,9 @@ public final class LauncherModule extends XposedModule {
     private volatile String lastViewportReport = "";
     // A layout change requires a fresh Launcher process, never a mid-drag
     // configuration swap between live views, loader and database.
-    private boolean configInitialized;
+    // Latch only after a valid config is loaded or all storage tiers are mounted.
+    private volatile boolean configInitialized;
+    private boolean pendingStorageLogged;
     private volatile String lastRotationGridLog = "";
     private volatile String lastGridReport = "";
     private volatile String lastLoaderBoundsReport = "";
@@ -59,45 +55,72 @@ public final class LauncherModule extends XposedModule {
     private final ThreadLocal<Boolean> checkingStoredWorkspaceCells = new ThreadLocal<>();
     private final ThreadLocal<Boolean> migrationResetPending = new ThreadLocal<>();
 
-    private synchronized void refresh() {
+    private void refresh() {
         if (configInitialized) return;
-        configInitialized = true;
-        try (BufferedReader reader = new BufferedReader(new FileReader(INDICATOR_FILE))) {
-            indicatorActivity = IndicatorActivityConfig.parse(reader.readLine());
-        } catch (java.io.FileNotFoundException ignored) {
-            // Use the stock indicator when the user has not configured a target.
-        } catch (java.io.IOException error) {
-            log(Log.WARN, TAG, "indicator activity configuration read failed: " + error);
-        }
-        // Independent of launcher_grid: users may adjust native margins
-        // without enabling a custom grid.
-        try (BufferedReader margins = new BufferedReader(new FileReader(MARGINS_FILE))) {
-            String line = margins.readLine();
-            if (line != null) workspaceMargins = WorkspaceMarginConfig.parse(line);
-        } catch (java.io.FileNotFoundException ignored) {
-            workspaceMargins = WorkspaceMarginConfig.DEFAULT;
-        } catch (Exception error) {
-            log(Log.ERROR, TAG, "invalid workspace margins, retaining native geometry: "
-                    + error);
-            workspaceMargins = WorkspaceMarginConfig.DEFAULT;
-        }
-        try (BufferedReader reader = new BufferedReader(new FileReader(CONFIG_FILE))) {
-            String line = reader.readLine();
-            if (line == null) return;
-            String[] parts = line.trim().split("\\s+");
-            if (parts.length < 2 || parts.length > 3) return;
-            int columns = Integer.parseInt(parts[0]);
-            int rows = Integer.parseInt(parts[1]);
-            // This Launcher build parses DeviceGridState axes as single digits.
-            if (columns >= 4 && columns <= 8 && rows >= 3 && rows <= 8) {
-                requestedColumns = columns;
-                requestedRows = rows;
-                keepEmptySlots = parts.length < 3 || !"0".equals(parts[2]);
+        synchronized (this) {
+            if (configInitialized) return;
+            ModuleConfigStore store = configStore;
+
+            ModuleConfigStore.ReadResult indicatorResult =
+                    store.readFirstLine(ModuleConfigStore.INDICATOR_FILE);
+            if (indicatorResult.line() != null) {
+                indicatorActivity = IndicatorActivityConfig.parse(indicatorResult.line());
+            } else if (indicatorResult.error() != null) {
+                log(Log.WARN, TAG, "indicator activity configuration read failed: "
+                        + indicatorResult.error());
             }
-        } catch (Exception e) {
-            // Missing configuration keeps the Launcher on its stock grid.
-            if (requestedColumns != 0) {
-                log(Log.WARN, TAG, "configuration read failed: " + e);
+
+            // Independent of launcher_grid: users may adjust native margins
+            // without enabling a custom grid.
+            ModuleConfigStore.ReadResult marginsResult =
+                    store.readFirstLine(ModuleConfigStore.MARGINS_FILE);
+            if (marginsResult.line() != null) {
+                try {
+                    workspaceMargins = WorkspaceMarginConfig.parse(marginsResult.line());
+                } catch (Exception error) {
+                    log(Log.ERROR, TAG, "invalid workspace margins, retaining native geometry: "
+                            + error);
+                    workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+                }
+            } else if (marginsResult.error() != null) {
+                log(Log.WARN, TAG, "workspace margins read failed: " + marginsResult.error());
+            }
+
+            ModuleConfigStore.ReadResult gridResult =
+                    store.readFirstLine(ModuleConfigStore.GRID_FILE);
+            boolean gridLoaded = false;
+            if (gridResult.line() != null) {
+                try {
+                    String[] parts = gridResult.line().trim().split("\\s+");
+                    if (parts.length >= 2 && parts.length <= 3) {
+                        int columns = Integer.parseInt(parts[0]);
+                        int rows = Integer.parseInt(parts[1]);
+                        // This Launcher build parses DeviceGridState axes as single digits.
+                        if (columns >= 4 && columns <= 8 && rows >= 3 && rows <= 8) {
+                            requestedColumns = columns;
+                            requestedRows = rows;
+                            keepEmptySlots = parts.length < 3 || !"0".equals(parts[2]);
+                            gridLoaded = true;
+                            log(Log.INFO, TAG, "loaded grid " + columns + "x" + rows
+                                    + " (keepEmpty=" + keepEmptySlots + ") from "
+                                    + gridResult.sourceFile());
+                        }
+                    }
+                } catch (Exception error) {
+                    log(Log.WARN, TAG, "grid configuration parse failed: " + error);
+                }
+            } else if (gridResult.error() != null) {
+                log(Log.WARN, TAG, "grid configuration read failed: " + gridResult.error());
+            }
+
+            if (gridLoaded || (gridResult.storageReady()
+                    && marginsResult.storageReady()
+                    && indicatorResult.storageReady())) {
+                configInitialized = true;
+            } else if (!pendingStorageLogged) {
+                pendingStorageLogged = true;
+                log(Log.WARN, TAG, "configuration storage not yet ready at boot; "
+                        + "will retry loading custom grid on next hook");
             }
         }
     }
@@ -407,6 +430,8 @@ public final class LauncherModule extends XposedModule {
                     View.class, false, false);
             Method getRows = HookSymbols.method(cellLayout, "getCountY", int.class, false, false);
             Method getColumns = HookSymbols.method(cellLayout, "getCountX", int.class, false, false);
+            Method getCellWidth = HookSymbols.method(cellLayout, "getCellWidth",
+                    int.class, false, false);
             Method getCellHeight = HookSymbols.method(cellLayout, "getCellHeight",
                     int.class, false, false);
             Method getProfile = HookSymbols.method(activityContext, "getDeviceProfile",
@@ -431,6 +456,7 @@ public final class LauncherModule extends XposedModule {
 
             // Both hooks and the pre-draw callback run on the Launcher UI thread.
             java.util.WeakHashMap<View, PortraitViewport> viewports = new java.util.WeakHashMap<>();
+            java.util.WeakHashMap<ViewGroup, PortraitGrid> measuredItemGrids = new java.util.WeakHashMap<>();
             hook(layerMeasure).intercept(chain -> {
                 View layer = (View) chain.getThisObject();
                 PortraitViewport viewport = viewports.get(layer);
@@ -444,15 +470,58 @@ public final class LauncherModule extends XposedModule {
                 return chain.proceed();
             });
             hook(onMeasure).intercept(chain -> {
+                refresh();
                 View page = (View) chain.getThisObject();
-                if (!(page.getParent() instanceof View)) return chain.proceed();
+                if (requestedColumns <= 0 || !isWorkspaceCell(page)
+                        || !(page.getParent() instanceof View)) return chain.proceed();
                 View workspace = (View) page.getParent();
                 if (!workspaceClass.isInstance(workspace)
                         || !(workspace.getParent() instanceof View)) return chain.proceed();
                 PortraitViewport viewport = viewports.get(workspace.getParent());
                 WorkspaceViewportPolicy.Fit fit = viewport == null ? null : viewport.initialFit.current();
-                if (fit == null || !isWorkspaceCell(page)) {
-                    return chain.proceed();
+                if (fit == null) {
+                    Object result = chain.proceed();
+                    try {
+                        int rows = (Integer) getRows.invoke(page);
+                        int columns = (Integer) getColumns.invoke(page);
+                        int cellWidth = (Integer) getCellWidth.invoke(page);
+                        int cellHeight = (Integer) getCellHeight.invoke(page);
+                        Point border = (Point) borderField.get(page);
+                        if (rows > 0 && columns > 0 && cellWidth > 0 && cellHeight > 0 && border != null) {
+                            ViewGroup items = (ViewGroup) getItems.invoke(page);
+                            PortraitGrid grid = new PortraitGrid(cellWidth, cellHeight, columns, rows,
+                                    border.x, border.y);
+                            if (items != null && items.getChildCount() > 0
+                                    && !grid.equals(measuredItemGrids.get(items))
+                                    && !dragging.getBoolean(page)
+                                    && !Boolean.TRUE.equals(placementDirty.invoke(page))) {
+                                setItemCellDimensions.invoke(items, cellWidth, cellHeight,
+                                        columns, rows, border);
+                                for (int i = 0; i < items.getChildCount(); i++) {
+                                    View item = items.getChildAt(i);
+                                    ViewGroup.LayoutParams params = item.getLayoutParams();
+                                    if (item.getVisibility() == View.GONE
+                                            || !itemParamsClass.isInstance(params)) {
+                                        continue;
+                                    }
+                                    boolean locked = lockedToGrid.getBoolean(params);
+                                    try {
+                                        lockedToGrid.setBoolean(params, true);
+                                        setupItemLayout.invoke(items, item);
+                                    } finally {
+                                        lockedToGrid.setBoolean(params, locked);
+                                    }
+                                }
+                                items.forceLayout();
+                                measuredItemGrids.put(items, grid);
+                                return chain.proceed();
+                            }
+                        }
+                    } catch (ReflectiveOperationException error) {
+                        log(Log.WARN, TAG, "landscape workspace item layout refresh failed: "
+                                + error + ", cause=" + error.getCause());
+                    }
+                    return result;
                 }
                 int widthSpec = (Integer) chain.getArgs().get(0);
                 int height = fit.height();
@@ -485,7 +554,8 @@ public final class LauncherModule extends XposedModule {
                     setItemCellDimensions.invoke(items, cellWidth, cellHeight, columns, rows, border);
                     PortraitGrid grid = new PortraitGrid(cellWidth, cellHeight, columns, rows,
                             border.x, border.y);
-                    if (!grid.equals(viewport.itemGrids.get(items))
+                    if (items.getChildCount() > 0
+                            && !grid.equals(viewport.itemGrids.get(items))
                             && !dragging.getBoolean(page)
                             && !Boolean.TRUE.equals(placementDirty.invoke(page))) {
                         for (int i = 0; i < items.getChildCount(); i++) {
@@ -506,6 +576,7 @@ public final class LauncherModule extends XposedModule {
                         }
                         items.forceLayout();
                         viewport.itemGrids.put(items, grid);
+                        measuredItemGrids.put(items, grid);
                     }
                 } catch (ReflectiveOperationException error) {
                     log(Log.WARN, TAG, "workspace item layout refresh failed: " + error
@@ -524,6 +595,7 @@ public final class LauncherModule extends XposedModule {
 
             hook(onLayout).intercept(chain -> {
                 Object result = chain.proceed();
+                refresh();
                 if (requestedColumns < 6) return result;
                 ViewGroup layer = (ViewGroup) chain.getThisObject();
                 for (int i = 0; i < layer.getChildCount(); i++) {
@@ -780,6 +852,10 @@ public final class LauncherModule extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (!"com.android.launcher".equals(param.getPackageName())) return;
         ClassLoader loader = param.getDefaultClassLoader();
+        ApplicationInfo appInfo = param.getApplicationInfo();
+        configStore = ModuleConfigStore.forApplicationInfo(
+                appInfo != null ? appInfo.deviceProtectedDataDir : null,
+                appInfo != null ? appInfo.dataDir : null);
         refresh();
         // Diagnostics only: each hook below resolves and fails independently.
         // The previous global early-return disabled a working workspace grid.
@@ -928,6 +1004,7 @@ public final class LauncherModule extends XposedModule {
             Method mark = HookSymbols.method(cursorClass, "markDeleted",
                     void.class, false, false, String.class);
             hook(mark).intercept(chain -> {
+                refresh();
                 String reason = (String) chain.getArgs().get(0);
                 if (requestedColumns <= 0 || requestedRows <= 0) {
                     return chain.proceed();
@@ -986,6 +1063,7 @@ public final class LauncherModule extends XposedModule {
             Method placement = HookSymbols.method(cursor, "checkItemPlacement",
                     boolean.class, false, false, itemClass, screens);
             hook(placement).intercept(chain -> {
+                refresh();
                 Object item = chain.getArgs().get(0);
                 if (requestedColumns <= 0 || requestedRows <= 0 || item == null
                         || container.getInt(item) != -100) return chain.proceed();
@@ -1067,6 +1145,7 @@ public final class LauncherModule extends XposedModule {
             Method isCompact = HookSymbols.method(arrangement, "c",
                     boolean.class, true, true);
             hook(isCompact).intercept(chain -> {
+                refresh();
                 if (LayoutPersistencePolicy.forceFree(
                         requestedColumns, requestedRows, keepEmptySlots)) {
                     if (!freeModeQueryObserved) {
@@ -1091,6 +1170,7 @@ public final class LauncherModule extends XposedModule {
             Method setMode = HookSymbols.method(arrangement, "e",
                     void.class, true, true, boolean.class);
             hook(setMode).intercept(chain -> {
+                refresh();
                 if (LayoutPersistencePolicy.forceFree(
                         requestedColumns, requestedRows, keepEmptySlots)) {
                     return chain.proceed(new Object[]{Boolean.FALSE});
@@ -1109,6 +1189,7 @@ public final class LauncherModule extends XposedModule {
             Method initMode = HookSymbols.method(arrangement, "b",
                     void.class, true, true, Context.class);
             hook(initMode).intercept(chain -> {
+                refresh();
                 Context context = (Context) chain.getArgs().get(0);
                 if (requestedColumns > 0 && requestedRows > 0) {
                     SharedPreferences prefs = context.getSharedPreferences(
@@ -1149,6 +1230,7 @@ public final class LauncherModule extends XposedModule {
             Method commit = HookSymbols.method(cursor, "commitUpdate",
                     void.class, false, false);
             hook(commit).intercept(chain -> {
+                refresh();
                 if (LayoutPersistencePolicy.forceFree(
                         requestedColumns, requestedRows, keepEmptySlots)) {
                     try {
@@ -1193,6 +1275,7 @@ public final class LauncherModule extends XposedModule {
                     pairClass, false, false, pairClass);
             log(Log.INFO, TAG, "resolved model loader boundary symbol: " + effective);
             hook(effective).intercept(chain -> {
+                refresh();
                 Object nativeResult = chain.proceed();
                 if (requestedColumns <= 0 || requestedRows <= 0) {
                     return nativeResult;
@@ -1233,6 +1316,7 @@ public final class LauncherModule extends XposedModule {
                     void.class, false, false, Rect.class);
             hook(setInsets).intercept(chain -> {
                 Object result = chain.proceed();
+                refresh();
                 WorkspaceMarginConfig margins = workspaceMargins;
                 if (!margins.isDefault() && chain.getThisObject() instanceof View) {
                     try {
@@ -1490,6 +1574,7 @@ public final class LauncherModule extends XposedModule {
             Method migrate = HookSymbols.method(migration, "migrateGridIfNeeded",
                     boolean.class, true, false, Context.class, profile);
             hook(migrate).intercept(chain -> {
+                refresh();
                 if (chain.getArgs().get(1) == null && requestedColumns > 0) {
                     try {
                         if (preserveExpansion((Context) chain.getArgs().get(0), loader)) {
@@ -1508,7 +1593,6 @@ public final class LauncherModule extends XposedModule {
     }
 
     private void installIndicatorActivityHook(ClassLoader loader) {
-        if (!indicatorActivity.enabled()) return;
         try {
             Class<?> entry = Class.forName("com.android.launcher3.search.IndicatorEntry", false, loader);
             Class<?> launcher = Class.forName("com.android.launcher.Launcher", false, loader);
@@ -1517,9 +1601,12 @@ public final class LauncherModule extends XposedModule {
             java.lang.reflect.Field launcherField = HookSymbols.field(
                     entry, "mLauncher", launcher, false, false);
             hook(start).intercept(chain -> {
+                refresh();
+                IndicatorActivityConfig config = indicatorActivity;
+                if (!config.enabled()) return chain.proceed();
                 Intent original = (Intent) chain.getArgs().get(0);
                 String target = original == null ? null
-                        : indicatorActivity.targetFor(original.getAction(), original.getPackage());
+                        : config.targetFor(original.getAction(), original.getPackage());
                 if (target == null) return chain.proceed();
                 ComponentName component = ComponentName.unflattenFromString(target);
                 if (component == null) return chain.proceed();

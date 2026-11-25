@@ -122,7 +122,7 @@ private fun GridPage(onOpenMargins: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        val saved = RootBridge.read(RootBridge.GRID).split(Regex("\\s+"))
+        val saved = RootBridge.readConfig(RootBridge.GRID_FILE).split(Regex("\\s+"))
         if (saved.size >= 2 && saved[0].toIntOrNull() != null && saved[1].toIntOrNull() != null) {
             columns = saved[0]
             rows = saved[1]
@@ -237,7 +237,7 @@ private fun MarginPage(onBack: () -> Unit) {
     )
 
     LaunchedEffect(Unit) {
-        val raw = RootBridge.readChecked(RootBridge.MARGINS)
+        val raw = RootBridge.readConfigChecked(RootBridge.MARGINS_FILE)
         if (raw == null) {
             status = "无法以 Root 读取现有配置，已禁止覆盖保存。请先授权后重开设置。"
             loaded = false
