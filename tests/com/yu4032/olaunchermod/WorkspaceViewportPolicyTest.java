@@ -64,4 +64,16 @@ public class WorkspaceViewportPolicyTest {
     @Test public void reportsInfeasibleGapSizeWithoutInventingSmallerNativeGaps() {
         assertTrue(WorkspaceViewportPolicy.maxCellHeight(100, 8, 8, 40) < 1);
     }
+
+    @Test public void separatesFolderTitleFromPreview() {
+        assertEquals(17, WorkspaceViewportPolicy.folderTitleOffset(533, 527, 580, 636, 11));
+    }
+
+    @Test public void capsFolderTitleOffsetAtTheFolderBottom() {
+        assertEquals(6, WorkspaceViewportPolicy.folderTitleOffset(533, 527, 630, 636, 11));
+    }
+
+    @Test public void keepsFolderTitleThatAlreadyHasClearance() {
+        assertEquals(0, WorkspaceViewportPolicy.folderTitleOffset(533, 548, 600, 636, 11));
+    }
 }

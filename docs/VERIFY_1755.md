@@ -15,16 +15,16 @@
 | 方向 | 真实工作区 | `effective_loader_bounds` |
 | --- | --- | --- |
 | 横屏（自然方向或旋转 180°） | **8×4** | **8×4** |
-| 竖屏（两种竖屏旋转） | **4×8** | **4×8** |
+| 竖屏（两种竖屏旋转） | **4×8** | **8×4** |
 
-`native_loader_bounds` 可以仍然是系统原生 6×4 或 4×6；它是未经模块调整的对照值。判断是否真正命中 Hook，应以 `effective_loader_bounds` 和对应加载日志为准。
+`native_loader_bounds` 是未经模块调整的对照值。原生 `checkItemPlacement()` 读取数据库的横屏 `cellX/cellY`，所以两种方向都用 8×4 校验。实际桌面在竖屏绑定时使用另一套 `vCellX/vCellY`，工作区仍为 4×8。判断是否命中 Hook，应分别核对 `effective_loader_bounds` 和 `actual_workspace`。
 
 注意：竖屏时小组件与图标的位置是否正确，还取决于原生 `vCellX/vCellY` 与模型冲突检测，网格转成 4×8 不等于保证所有旧项目可立即恢复显示。**禁止因为项目暂时不显示就清空桌面或再增加覆盖式迁移。**
 
 ## 依次验收
 
 1. 备份桌面数据库（主库与 WAL），测试时不使用重要图标。在 LSPosed 中启用本次模块，配置 8×4，清理旧日志状态。
-2. 仅重启 Launcher，不清除数据；观察 UI 是否仍 8×4、已有图标是否发生新的自动重排。
+2. 在横屏和竖屏分别重启 Launcher，不清除数据；核对工作区分别为 8×4、4×8，并确认已有文件夹和图标仍出现在各自的格位。
 3. 模块日志应包含：
    - `native grid source hook installed`
    - `FREE model query installed: public static boolean com.android.launcher.layout.i.c()`

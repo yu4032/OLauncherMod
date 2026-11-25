@@ -189,6 +189,10 @@ private fun GridPage(onOpenMargins: () -> Unit) {
             ) { Text("进入工作区位置设置") }
         }
 
+        SettingsSurface("指示器快捷入口", "指定点击「问小布」时打开的活动。") {
+            IndicatorActivityControls()
+        }
+
         SettingsSurface("运行状态", "模型加载边界与工作区测量报告。") {
             OutlinedButton(
                 onClick = { scope.launch { diagnostics = RootBridge.status() } },
