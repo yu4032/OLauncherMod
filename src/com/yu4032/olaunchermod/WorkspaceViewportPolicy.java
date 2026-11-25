@@ -6,11 +6,31 @@ final class WorkspaceViewportPolicy {
         final int gridTop;
         final int gridBottom;
         final int indicatorTop;
+        final int statusBarBottom;
+        final int dockTop;
 
-        Fit(int gridTop, int gridBottom, int indicatorTop) {
+        Fit(int gridTop, int gridBottom, int indicatorTop, int statusBarBottom, int dockTop) {
             this.gridTop = gridTop;
             this.gridBottom = gridBottom;
             this.indicatorTop = indicatorTop;
+            this.statusBarBottom = statusBarBottom;
+            this.dockTop = dockTop;
+        }
+
+        int height() {
+            return gridBottom - gridTop;
+        }
+    }
+
+    static final class InitialFit {
+        private Fit fit;
+
+        Fit current() {
+            return fit;
+        }
+
+        void capture(Fit candidate) {
+            if (fit == null && candidate.height() > 0) fit = candidate;
         }
     }
 
@@ -22,7 +42,8 @@ final class WorkspaceViewportPolicy {
         // the Dock boundary, its entire view (including the tap target) moves.
         int fittedIndicatorTop = indicatorHeight > 0
                 ? Math.min(indicatorTop, dockTop - indicatorHeight - indicatorGap) : dockTop;
-        return new Fit(top, Math.min(bottom, fittedIndicatorTop), fittedIndicatorTop);
+        return new Fit(top, Math.min(bottom, fittedIndicatorTop), fittedIndicatorTop,
+                statusBarBottom, dockTop);
     }
 
     static int maxCellHeight(int pageHeight, int cellPadding, int rows, int rowGap) {

@@ -15,10 +15,10 @@
 
 ## 修复策略
 
-- `launcher.xml` 中，`OplusWorkspace`、`OplusHotseat` 和 `OplusPageIndicator` 是 DragLayer 的直接子 View。竖屏下在 `OplusDragLayer.onLayout` 安排的一次性绘制前回调中，以同一坐标系读取当次 Dock 和工作区边界，避免旋转时取到旧 Dock 高度。
+- `launcher.xml` 中，`OplusWorkspace`、`OplusHotseat` 和 `OplusPageIndicator` 是 DragLayer 的直接子 View。进入竖屏后在绘制前读取首次有效的 Dock 和工作区边界，同一竖屏窗口期间复用这组边界。Dock 图标变化不重新计算工作区高度。离开竖屏、窗口尺寸改变或桌面重启后重新采样。
 - 网格上缘取工作区上缘（含原生 Insets 与设置的 Padding）和状态栏／刘海下缘中的较大值。网格下缘取工作区下缘、Dock 上缘和可用指示器上缘中的较小值。指示器距 Dock 不足 8dp 时，将整个 View 上移并留出 8dp。
 - 只对自定义网格中实际属于 Workspace 的竖屏页面（至少 6 行）应用这段范围。当范围变化且页面尚未适配时，在显示该帧前请求一次原生测量。CellLayout 按当前行数、内边距和行距计算单元格，并在测量子项前同步大文件夹与卡片的尺寸配置。绘制前回调只按需偏移页面位置。
-- `launcher_viewport_status` 记录状态栏下缘、Dock 上缘、指示器上缘、网格上下缘、行数及实际单元格高度。坐标均以 DragLayer 为原点。
+- `launcher_viewport_status` 记录限高时采样的状态栏下缘和 Dock 上缘、采用的指示器及网格边界、行数和实际单元格高度。坐标均以 DragLayer 为原点。
 
 ## Compose UI
 

@@ -61,6 +61,27 @@ public class WorkspaceViewportPolicyTest {
         assertEquals(1570, second.gridBottom);
     }
 
+    @Test public void dockMovementDoesNotChangeAnEstablishedPortraitFit() {
+        WorkspaceViewportPolicy.InitialFit session = new WorkspaceViewportPolicy.InitialFit();
+        WorkspaceViewportPolicy.Fit first =
+                WorkspaceViewportPolicy.fit(0, 1920, 80, 1650, 1600, 36, 8);
+        session.capture(first);
+        session.capture(WorkspaceViewportPolicy.fit(0, 1920, 80, 1740, 1690, 36, 8));
+        assertSame(first, session.current());
+        assertEquals(1650, session.current().dockTop);
+        assertEquals(1520, session.current().height());
+    }
+
+    @Test public void incompleteInitialLayoutDoesNotFreezeThePortraitFit() {
+        WorkspaceViewportPolicy.InitialFit session = new WorkspaceViewportPolicy.InitialFit();
+        session.capture(WorkspaceViewportPolicy.fit(80, 1920, 80, 100, 70, 36, 8));
+        assertNull(session.current());
+        WorkspaceViewportPolicy.Fit valid =
+                WorkspaceViewportPolicy.fit(0, 1920, 80, 1740, 1690, 36, 8);
+        session.capture(valid);
+        assertSame(valid, session.current());
+    }
+
     @Test public void reportsInfeasibleGapSizeWithoutInventingSmallerNativeGaps() {
         assertTrue(WorkspaceViewportPolicy.maxCellHeight(100, 8, 8, 40) < 1);
     }
