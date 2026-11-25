@@ -457,6 +457,21 @@ public final class LauncherModule extends XposedModule {
             // Both hooks and the pre-draw callback run on the Launcher UI thread.
             java.util.WeakHashMap<View, PortraitViewport> viewports = new java.util.WeakHashMap<>();
             java.util.WeakHashMap<ViewGroup, PortraitGrid> measuredItemGrids = new java.util.WeakHashMap<>();
+            final PortraitGrid[] activePortraitFolderGrid = new PortraitGrid[1];
+            hook(updateFolderMetrics).intercept(chain -> {
+                PortraitGrid fitted = activePortraitFolderGrid[0];
+                if (fitted != null && requestedColumns >= 6) {
+                    int rows = (Integer) chain.getArgs().get(2);
+                    int columns = (Integer) chain.getArgs().get(3);
+                    if (rows == fitted.rows && columns == fitted.columns) {
+                        Object[] args = chain.getArgs().toArray();
+                        args[0] = fitted.cellWidth;
+                        args[1] = fitted.cellHeight;
+                        return chain.proceed(args);
+                    }
+                }
+                return chain.proceed();
+            });
             hook(layerMeasure).intercept(chain -> {
                 View layer = (View) chain.getThisObject();
                 PortraitViewport viewport = viewports.get(layer);
@@ -465,6 +480,7 @@ public final class LauncherModule extends XposedModule {
                     int height = View.MeasureSpec.getSize((Integer) chain.getArgs().get(1));
                     if (viewport.width != width || viewport.layerHeight != height) {
                         viewports.remove(layer);
+                        activePortraitFolderGrid[0] = null;
                     }
                 }
                 return chain.proceed();
@@ -540,6 +556,8 @@ public final class LauncherModule extends XposedModule {
                 try {
                     // Native grid setters update SizeSpacingConfig before
                     // measuring large folders and cards. Use the fitted sizes.
+                    activePortraitFolderGrid[0] = new PortraitGrid(cellWidth, cellHeight,
+                            columns, rows, border.x, border.y);
                     Object profile = getProfile.invoke(activityField.get(page));
                     if (profile != null) {
                         updateFolderMetrics.invoke(profile, cellWidth, cellHeight, rows, columns, false);
@@ -604,6 +622,7 @@ public final class LauncherModule extends XposedModule {
                     ViewGroup workspace = (ViewGroup) child;
                     if (layer.getHeight() <= layer.getWidth()) {
                         viewports.remove(layer);
+                        activePortraitFolderGrid[0] = null;
                         break;
                     }
                     PortraitViewport viewport =
