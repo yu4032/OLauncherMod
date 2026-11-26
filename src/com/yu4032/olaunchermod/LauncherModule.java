@@ -842,6 +842,78 @@ public final class LauncherModule extends XposedModule {
         log(Log.INFO, TAG, "dock offset " + value.replace('\n', ' '));
     }
 
+    private void installDockOffsetHook(ClassLoader loader) {
+        try {
+            Class<?> deviceProfile = Class.forName(
+                    "com.android.launcher3.DeviceProfile", false, loader);
+            java.lang.reflect.Field hotseatParamField =
+                    deviceProfile.getDeclaredField("mHotseatParam");
+            Class<?> hotseatParamClass = hotseatParamField.getType();
+            Method computeBottomMargin = HookSymbols.method(hotseatParamClass, "e",
+                    int.class, false, true, boolean.class);
+            hook(computeBottomMargin).intercept(chain -> {
+                int nativeBottom = (Integer) chain.proceed();
+                refresh();
+                DockOffsetConfig offset = dockOffset;
+                if (offset.isDefault()) return nativeBottom;
+                Context context = launcherContext(loader);
+                if (context == null) return nativeBottom;
+                try {
+                    android.util.DisplayMetrics metrics =
+                            context.getResources().getDisplayMetrics();
+                    int[] axes = GridOrientation.current(context, 8, 4, 8, 4);
+                    boolean isPortrait = axes[0] == 4;
+                    int adjusted = offset.adjustBottomMargin(
+                            nativeBottom, metrics.density, 0,
+                            metrics.heightPixels, isPortrait);
+                    recordDockState(context, offset, nativeBottom, adjusted, isPortrait);
+                    return adjusted;
+                } catch (Throwable error) {
+                    log(Log.ERROR, TAG, "dock offset computation failed: " + error);
+                    return nativeBottom;
+                }
+            });
+            log(Log.INFO, TAG, "dock vertical offset hook installed ("
+                    + hotseatParamClass.getName() + "#" + computeBottomMargin.getName() + ")");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "dock vertical offset hook failed: " + error);
+        }
+
+        try {
+            Class<?> taskbarUtils = Class.forName(
+                    "com.android.launcher3.taskbar.TaskbarUtils", false, loader);
+            Method specHeight = HookSymbols.method(taskbarUtils,
+                    "getTaskbarWindowSpecHeight", int.class, true, false, Context.class);
+            hook(specHeight).intercept(chain -> {
+                int baseHeight = (Integer) chain.proceed();
+                refresh();
+                DockOffsetConfig offset = dockOffset;
+                if (offset.isDefault()) return baseHeight;
+                Context argCtx = !chain.getArgs().isEmpty() && chain.getArgs().get(0) instanceof Context
+                        ? (Context) chain.getArgs().get(0) : null;
+                Context context = argCtx != null ? argCtx : launcherContext(loader);
+                if (context == null) return baseHeight;
+                try {
+                    android.util.DisplayMetrics metrics =
+                            context.getResources().getDisplayMetrics();
+                    int[] axes = GridOrientation.current(context, 8, 4, 8, 4);
+                    boolean isPortrait = axes[0] == 4;
+                    int offsetDp = offset.get(isPortrait);
+                    if (offsetDp < 0) {
+                        int extraPx = Math.round(-offsetDp * metrics.density);
+                        return Math.min(metrics.heightPixels, baseHeight + extraPx);
+                    }
+                } catch (Throwable error) {
+                    log(Log.WARN, TAG, "taskbar window height adjust failed: " + error);
+                }
+                return baseHeight;
+            });
+            log(Log.INFO, TAG, "taskbar window height guard installed");
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "taskbar window height guard unavailable: " + error);
+        }
+    }
+
     private void syncWorkspaceOccupancy(Object cell, ClassLoader loader,
             String stage) {
         if (requestedColumns <= 0 || requestedRows <= 0
@@ -1413,51 +1485,12 @@ public final class LauncherModule extends XposedModule {
             log(Log.ERROR, TAG, "workspace padding customization hook failed: " + error);
         }
 
-        // ColorOS 17.5.5 OplusHotseat.setWindowInsets(Rect) assigns
-        // bottomMargin from DeviceProfile.mHotseatParam.j(). Adjust bottomMargin
-        // afterward so visual bounds, touch targets, blur pill, and portrait
-        // DragLayer viewport fitting stay synchronized.
-        try {
-            Class<?> oplusHotseat = Class.forName(
-                    "com.android.launcher3.OplusHotseat", false, loader);
-            Method setWindowInsets = HookSymbols.method(oplusHotseat, "setWindowInsets",
-                    void.class, false, false, Rect.class);
-            hook(setWindowInsets).intercept(chain -> {
-                Object result = chain.proceed();
-                refresh();
-                DockOffsetConfig offset = dockOffset;
-                if (!offset.isDefault() && chain.getThisObject() instanceof View hotseat) {
-                    try {
-                        ViewGroup.LayoutParams rawLp = hotseat.getLayoutParams();
-                        if (rawLp instanceof ViewGroup.MarginLayoutParams lp) {
-                            int nativeBottom = lp.bottomMargin;
-                            android.util.DisplayMetrics metrics =
-                                    hotseat.getResources().getDisplayMetrics();
-                            int[] axes = GridOrientation.current(hotseat.getContext(),
-                                    8, 4, 8, 4);
-                            boolean isPortrait = axes[0] == 4;
-                            int containerH = hotseat.getParent() instanceof View parent && parent.getHeight() > 0
-                                    ? parent.getHeight() : metrics.heightPixels;
-                            int adjustedBottom = offset.adjustBottomMargin(
-                                    nativeBottom, metrics.density, hotseat.getHeight(),
-                                    containerH, isPortrait);
-                            if (adjustedBottom != nativeBottom) {
-                                lp.bottomMargin = adjustedBottom;
-                                hotseat.setLayoutParams(lp);
-                            }
-                            recordDockState(hotseat.getContext(), offset, nativeBottom,
-                                    adjustedBottom, isPortrait);
-                        }
-                    } catch (Throwable error) {
-                        log(Log.ERROR, TAG, "dock offset application failed: " + error);
-                    }
-                }
-                return result;
-            });
-            log(Log.INFO, TAG, "dock vertical offset hook installed (OplusHotseat.setWindowInsets)");
-        } catch (Throwable error) {
-            log(Log.ERROR, TAG, "dock vertical offset hook failed: " + error);
-        }
+        // ColorOS 17.5.5 computes bottomMargin for both OplusHotseat
+        // (via DeviceProfile.mHotseatParam.j() -> e(b)) and in-app Taskbar
+        // (via TaskbarParams.e() -> mHotseatParam.e(true) -> mTaskbarParam.j/k).
+        // Hook mHotseatParam#e(boolean) and expand TaskbarUtils.getTaskbarWindowSpecHeight
+        // so Home Hotseat, in-app pull-out Taskbar, blur pill, and stash height stay in sync.
+        installDockOffsetHook(loader);
 
         installPortraitViewportHook(loader);
 

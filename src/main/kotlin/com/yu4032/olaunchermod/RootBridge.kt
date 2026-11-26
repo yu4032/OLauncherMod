@@ -20,7 +20,7 @@ internal object RootBridge {
     private fun execute(command: String): Result {
         var process: Process? = null
         return try {
-            process = ProcessBuilder("su", "-c", command)
+            process = ProcessBuilder("su", "-M", "-c", command)
                 .redirectErrorStream(true).start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
             Result(process.waitFor() == 0, output.trim())
