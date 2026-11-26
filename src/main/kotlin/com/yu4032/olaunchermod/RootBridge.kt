@@ -12,6 +12,7 @@ internal object RootBridge {
     const val DIR = ModuleConfigStore.LEGACY_EXTERNAL_DIR
     const val GRID_FILE = ModuleConfigStore.GRID_FILE
     const val MARGINS_FILE = ModuleConfigStore.MARGINS_FILE
+    const val DOCK_FILE = ModuleConfigStore.DOCK_FILE
     private const val INDICATOR_FILE = ModuleConfigStore.INDICATOR_FILE
 
     data class Result(val ok: Boolean, val text: String)
@@ -64,13 +65,15 @@ internal object RootBridge {
     private suspend fun writeConfig(
         fileName: String,
         content: String,
-        clearStatusFiles: List<String> = emptyList()
+        clearStatusFiles: List<String> = emptyList(),
+        restartLauncher: Boolean = true
     ): Boolean = withContext(Dispatchers.IO) {
         require(fileName.matches(Regex("[A-Za-z0-9._-]+")))
         require(!content.contains('\''))
         val rmStatus = if (clearStatusFiles.isEmpty()) "" else {
             clearStatusFiles.joinToString(" ") { "'$DIR/$it'" }.let { "rm -f $it || true" }
         }
+        val restartCmd = if (restartLauncher) "am force-stop com.android.launcher" else ""
         execute("""
             write_internal() {
                 base="${'$'}1"
@@ -108,7 +111,7 @@ internal object RootBridge {
             if [ -d '$DE_BASE' ] && [ "${'$'}de_ok" -ne 1 ]; then exit 1; fi
             if [ "${'$'}de_ok" -ne 1 ] && [ "${'$'}ce_ok" -ne 1 ] && [ "${'$'}ext_ok" -ne 1 ]; then exit 1; fi
             $rmStatus
-            am force-stop com.android.launcher
+            $restartCmd
         """.trimIndent()).ok
     }
 
@@ -273,21 +276,45 @@ internal object RootBridge {
         )
     }
 
-    suspend fun saveMargins(config: WorkspaceMarginConfig): Boolean {
-        // All characters are validated decimal integers and spaces by parser.
-        val content = config.serialize()
-        require(content.matches(Regex("[-0-9 ]+")))
-        return writeConfig(
+    suspend fun saveMargins(config: WorkspaceMarginConfig): Boolean =
+        saveLayoutAdjustments(config, null)
+
+    suspend fun saveLayoutAdjustments(
+        margins: WorkspaceMarginConfig,
+        dockOffset: DockOffsetConfig?
+    ): Boolean {
+        val marginContent = margins.serialize()
+        require(marginContent.matches(Regex("[-0-9 ]+")))
+        if (dockOffset == null) {
+            return writeConfig(
+                MARGINS_FILE,
+                marginContent,
+                listOf("launcher_margin_status", "launcher_viewport_status"),
+                restartLauncher = true
+            )
+        }
+        val dockContent = dockOffset.serialize()
+        require(dockContent.matches(Regex("[-0-9 ]+")))
+        val okMargins = writeConfig(
             MARGINS_FILE,
-            content,
-            listOf("launcher_margin_status", "launcher_viewport_status")
+            marginContent,
+            listOf("launcher_margin_status", "launcher_viewport_status"),
+            restartLauncher = false
         )
+        val okDock = writeConfig(
+            DOCK_FILE,
+            dockContent,
+            listOf("launcher_dock_status", "launcher_viewport_status"),
+            restartLauncher = true
+        )
+        return okMargins && okDock
     }
 
     suspend fun status(): String = withContext(Dispatchers.IO) {
         val grid = read("$DIR/launcher_grid_status")
         val loader = read("$DIR/launcher_loader_status")
         val margin = read("$DIR/launcher_margin_status")
+        val dock = read("$DIR/launcher_dock_status")
         val viewport = read("$DIR/launcher_viewport_status")
         buildString {
             appendLine("工作区实际网格")
@@ -296,6 +323,8 @@ internal object RootBridge {
             appendLine(loader.ifEmpty { "尚无记录；检查 yn9.v 的 Hook 日志。" })
             appendLine("工作区边距")
             appendLine(margin.ifEmpty { "默认边距或尚无记录。" })
+            appendLine("Dock 垂直位移")
+            appendLine(dock.ifEmpty { "默认位置或尚无记录。" })
             appendLine("竖屏可用高度")
             appendLine(viewport.ifEmpty { "尚无竖屏测量记录。" })
         }

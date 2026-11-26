@@ -13,7 +13,7 @@
         <activity
             android:name=".MarginSettingsActivity"
             android:exported="false"
-            android:label="工作区位置" />
+            android:label="工作区与 Dock 位置" />
 
         <activity
             android:name=".IconSettingsActivity"

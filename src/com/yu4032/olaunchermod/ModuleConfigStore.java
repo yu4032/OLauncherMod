@@ -25,6 +25,7 @@ import java.util.Set;
 final class ModuleConfigStore {
     static final String GRID_FILE = "launcher_grid";
     static final String MARGINS_FILE = "launcher_workspace_margins";
+    static final String DOCK_FILE = "launcher_dock_offset";
     static final String INDICATOR_FILE = IndicatorActivityConfig.FILE_NAME;
 
     static final String DEFAULT_DE_DIR = "/data/user_de/0/com.android.launcher/files";

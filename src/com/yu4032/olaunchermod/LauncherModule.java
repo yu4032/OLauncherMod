@@ -40,8 +40,10 @@ public final class LauncherModule extends XposedModule {
     private volatile int requestedRows;
     private volatile boolean keepEmptySlots = true;
     private volatile WorkspaceMarginConfig workspaceMargins = WorkspaceMarginConfig.DEFAULT;
+    private volatile DockOffsetConfig dockOffset = DockOffsetConfig.DEFAULT;
     private volatile IndicatorActivityConfig indicatorActivity = IndicatorActivityConfig.DEFAULT;
     private volatile String lastMarginReport = "";
+    private volatile String lastDockReport = "";
     private volatile String lastViewportReport = "";
     // A layout change requires a fresh Launcher process, never a mid-drag
     // configuration swap between live views, loader and database.
@@ -86,6 +88,20 @@ public final class LauncherModule extends XposedModule {
                 log(Log.WARN, TAG, "workspace margins read failed: " + marginsResult.error());
             }
 
+            ModuleConfigStore.ReadResult dockResult =
+                    store.readFirstLine(ModuleConfigStore.DOCK_FILE);
+            if (dockResult.line() != null) {
+                try {
+                    dockOffset = DockOffsetConfig.parse(dockResult.line());
+                } catch (Exception error) {
+                    log(Log.ERROR, TAG, "invalid dock offset, retaining native geometry: "
+                            + error);
+                    dockOffset = DockOffsetConfig.DEFAULT;
+                }
+            } else if (dockResult.error() != null) {
+                log(Log.WARN, TAG, "dock offset read failed: " + dockResult.error());
+            }
+
             ModuleConfigStore.ReadResult gridResult =
                     store.readFirstLine(ModuleConfigStore.GRID_FILE);
             boolean gridLoaded = false;
@@ -115,6 +131,7 @@ public final class LauncherModule extends XposedModule {
 
             if (gridLoaded || (gridResult.storageReady()
                     && marginsResult.storageReady()
+                    && dockResult.storageReady()
                     && indicatorResult.storageReady())) {
                 configInitialized = true;
             } else if (!pendingStorageLogged) {
@@ -802,6 +819,29 @@ public final class LauncherModule extends XposedModule {
         log(Log.INFO, TAG, "workspace padding " + value.replace('\n', ' '));
     }
 
+    private synchronized void recordDockState(Context context,
+            DockOffsetConfig offset, int nativeBottom, int actualBottom,
+            boolean isPortrait) {
+        String value = "orientation=" + (isPortrait ? "portrait" : "landscape") + "\n"
+                + "configured_dp=" + offset.serialize() + "\n"
+                + "native_bottom_px=" + nativeBottom + "\n"
+                + "actual_bottom_px=" + actualBottom + "\n";
+        if (value.equals(lastDockReport)) return;
+        lastDockReport = value;
+        try {
+            File dir = context.getExternalFilesDir(null);
+            if (dir != null) {
+                try (java.io.FileOutputStream output = new java.io.FileOutputStream(
+                        new File(dir, "launcher_dock_status"))) {
+                    output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "dock status unavailable: " + error);
+        }
+        log(Log.INFO, TAG, "dock offset " + value.replace('\n', ' '));
+    }
+
     private void syncWorkspaceOccupancy(Object cell, ClassLoader loader,
             String stage) {
         if (requestedColumns <= 0 || requestedRows <= 0
@@ -1371,6 +1411,52 @@ public final class LauncherModule extends XposedModule {
                     + " (17.5.5 Workspace.setInsets)");
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "workspace padding customization hook failed: " + error);
+        }
+
+        // ColorOS 17.5.5 OplusHotseat.setWindowInsets(Rect) assigns
+        // bottomMargin from DeviceProfile.mHotseatParam.j(). Adjust bottomMargin
+        // afterward so visual bounds, touch targets, blur pill, and portrait
+        // DragLayer viewport fitting stay synchronized.
+        try {
+            Class<?> oplusHotseat = Class.forName(
+                    "com.android.launcher3.OplusHotseat", false, loader);
+            Method setWindowInsets = HookSymbols.method(oplusHotseat, "setWindowInsets",
+                    void.class, false, false, Rect.class);
+            hook(setWindowInsets).intercept(chain -> {
+                Object result = chain.proceed();
+                refresh();
+                DockOffsetConfig offset = dockOffset;
+                if (!offset.isDefault() && chain.getThisObject() instanceof View hotseat) {
+                    try {
+                        ViewGroup.LayoutParams rawLp = hotseat.getLayoutParams();
+                        if (rawLp instanceof ViewGroup.MarginLayoutParams lp) {
+                            int nativeBottom = lp.bottomMargin;
+                            android.util.DisplayMetrics metrics =
+                                    hotseat.getResources().getDisplayMetrics();
+                            int[] axes = GridOrientation.current(hotseat.getContext(),
+                                    8, 4, 8, 4);
+                            boolean isPortrait = axes[0] == 4;
+                            int containerH = hotseat.getParent() instanceof View parent && parent.getHeight() > 0
+                                    ? parent.getHeight() : metrics.heightPixels;
+                            int adjustedBottom = offset.adjustBottomMargin(
+                                    nativeBottom, metrics.density, hotseat.getHeight(),
+                                    containerH, isPortrait);
+                            if (adjustedBottom != nativeBottom) {
+                                lp.bottomMargin = adjustedBottom;
+                                hotseat.setLayoutParams(lp);
+                            }
+                            recordDockState(hotseat.getContext(), offset, nativeBottom,
+                                    adjustedBottom, isPortrait);
+                        }
+                    } catch (Throwable error) {
+                        log(Log.ERROR, TAG, "dock offset application failed: " + error);
+                    }
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "dock vertical offset hook installed (OplusHotseat.setWindowInsets)");
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "dock vertical offset hook failed: " + error);
         }
 
         installPortraitViewportHook(loader);

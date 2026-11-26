@@ -185,11 +185,11 @@ private fun GridPage(onOpenMargins: () -> Unit, onOpenIconFix: () -> Unit) {
             Text(message, style = MaterialTheme.typography.bodySmall)
         }
 
-        SettingsSurface("工作区位置", "横屏、竖屏分别调整水平、顶部和底部留白，支持滑块、精确输入及重置。") {
+        SettingsSurface("工作区与 Dock 位置", "横屏、竖屏分别调整工作区边距及 Dock 栏垂直位移，支持滑块、精确输入及重置。") {
             FilledTonalButton(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onOpenMargins
-            ) { Text("进入工作区位置设置") }
+            ) { Text("进入工作区与 Dock 位置设置") }
         }
 
         SettingsSurface("指示器快捷入口", "指定点击「问小布」时打开的活动。") {
@@ -227,17 +227,19 @@ class MarginSettingsActivity : ComponentActivity() {
 @Composable
 private fun MarginPage(onBack: () -> Unit) {
     var draft by remember { mutableStateOf(WorkspaceMarginConfig.DEFAULT) }
+    var dockDraft by remember { mutableStateOf(DockOffsetConfig.DEFAULT) }
     val currentOrientation = LocalConfiguration.current.orientation
     var portrait by rememberSaveable {
         mutableStateOf(currentOrientation == Configuration.ORIENTATION_PORTRAIT)
     }
     var loaded by remember { mutableStateOf(false) }
     var dirty by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("正在读取边距…") }
+    var status by remember { mutableStateOf("正在读取位置设置…") }
     var saving by remember { mutableStateOf(false) }
     var initialLegacyAsymmetric by remember { mutableStateOf(false) }
     var showLegacyConfirm by remember { mutableStateOf(false) }
     var editAxis by remember { mutableIntStateOf(-1) }
+    var editDock by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val labels = listOf("水平距离偏移", "顶部距离偏移", "底部距离偏移")
     val details = listOf(
@@ -248,7 +250,8 @@ private fun MarginPage(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         val raw = RootBridge.readConfigChecked(RootBridge.MARGINS_FILE)
-        if (raw == null) {
+        val rawDock = RootBridge.readConfigChecked(RootBridge.DOCK_FILE)
+        if (raw == null || rawDock == null) {
             status = "无法以 Root 读取现有配置，已禁止覆盖保存。请先授权后重开设置。"
             loaded = false
             return@LaunchedEffect
@@ -256,11 +259,14 @@ private fun MarginPage(onBack: () -> Unit) {
         try {
             draft = if (raw.isBlank()) WorkspaceMarginConfig.DEFAULT
                 else WorkspaceMarginConfig.parse(raw)
+            dockDraft = if (rawDock.isBlank()) DockOffsetConfig.DEFAULT
+                else DockOffsetConfig.parse(rawDock)
             initialLegacyAsymmetric = draft.isLegacyAsymmetric()
             status = if (draft.isLegacy()) "已载入旧版四边距；编辑后转为横竖屏独立设置。"
                 else "参数已读取。调节滑块不会立即改动桌面。"
         } catch (error: IllegalArgumentException) {
             draft = WorkspaceMarginConfig.DEFAULT
+            dockDraft = DockOffsetConfig.DEFAULT
             status = "旧配置无效，未改动文件；需重新确认后保存。"
         }
         loaded = true
@@ -271,12 +277,18 @@ private fun MarginPage(onBack: () -> Unit) {
         draft = draft.with(portrait, axis, limited)
         dirty = true
     }
+    fun updateDock(value: Int) {
+        val limited = value.coerceIn(-DockOffsetConfig.LIMIT_DP, DockOffsetConfig.LIMIT_DP)
+        dockDraft = dockDraft.with(portrait, limited)
+        dirty = true
+    }
     fun applyNow() {
         if (!loaded || saving) return
         saving = true
         val snapshot = draft
+        val dockSnapshot = dockDraft
         scope.launch {
-            val ok = RootBridge.saveMargins(snapshot)
+            val ok = RootBridge.saveLayoutAdjustments(snapshot, dockSnapshot)
             saving = false
             status = if (ok) "设置已保存，桌面将重新启动。" else "保存失败，请检查 Root 授权。"
             if (ok) {
@@ -285,7 +297,7 @@ private fun MarginPage(onBack: () -> Unit) {
             }
         }
     }
-    PageFrame("工作区位置", "COUI 风格 Compose 设置 · 横竖屏独立布局") {
+    PageFrame("工作区与 Dock 位置", "COUI 风格 Compose 设置 · 横竖屏独立布局") {
         TextButton(onClick = onBack) { Text("返回网格设置") }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth()) {
@@ -333,16 +345,51 @@ private fun MarginPage(onBack: () -> Unit) {
                 if (axis < 2) HorizontalDivider()
             }
         }
+        val dockValue = dockDraft.get(portrait)
+        val dockDirection = when {
+            dockValue == 0 -> "当前：系统默认位置"
+            dockValue > 0 -> "当前：向下偏移 $dockValue dp（正值下移、负值上移）"
+            else -> "当前：向上偏移 ${-dockValue} dp（正值下移、负值上移）"
+        }
+        SettingsSurface("Dock 栏垂直位移", "单位 dp · -300～300。竖屏上移时会自动适配页面指示器与图标高度。") {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("垂直位移", fontWeight = FontWeight.SemiBold)
+                        Text(dockDirection, fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = { editDock = true }) {
+                        Text("$dockValue dp", fontWeight = FontWeight.Bold)
+                    }
+                }
+                Slider(
+                    value = dockValue.toFloat(),
+                    onValueChange = { updateDock(it.roundToInt()) },
+                    valueRange = -DockOffsetConfig.LIMIT_DP.toFloat()..DockOffsetConfig.LIMIT_DP.toFloat()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.End,
+                    modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = { updateDock(0) }) { Text("重置") }
+                    OutlinedButton(onClick = { updateDock(dockValue - 1) }) { Text("−") }
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(onClick = { updateDock(dockValue + 1) }) { Text("+") }
+                }
+            }
+        }
         SettingsSurface("重置与应用", "修改会先保留在本页面；保存时才写入配置并重启桌面。") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(modifier = Modifier.weight(1f),
                     onClick = {
                         draft = draft.resetOrientation(portrait)
+                        dockDraft = dockDraft.resetOrientation(portrait)
                         dirty = true
                     }) { Text("重置当前方向") }
                 OutlinedButton(modifier = Modifier.weight(1f),
                     onClick = {
                         draft = WorkspaceMarginConfig.DEFAULT
+                        dockDraft = DockOffsetConfig.DEFAULT
                         dirty = true
                     }) { Text("全部恢复默认") }
             }
@@ -355,7 +402,7 @@ private fun MarginPage(onBack: () -> Unit) {
                     } else applyNow()
                 }
             ) {
-                Text(if (saving) "正在保存…" else "应用边距并重启桌面")
+                Text(if (saving) "正在保存…" else "应用位置并重启桌面")
             }
             Text(status, fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -391,6 +438,36 @@ private fun MarginPage(onBack: () -> Unit) {
             },
             dismissButton = {
                 TextButton(onClick = { editAxis = -1 }) { Text("取消") }
+            }
+        )
+    }
+    if (editDock) {
+        var valueText by remember(portrait) {
+            mutableStateOf(dockDraft.get(portrait).toString())
+        }
+        val parsed = valueText.toIntOrNull()
+        AlertDialog(
+            onDismissRequest = { editDock = false },
+            title = { Text("Dock 栏垂直位移") },
+            text = {
+                OutlinedTextField(
+                    value = valueText, onValueChange = { valueText = it },
+                    label = { Text("输入 -300～300 dp（正数下移，负数上移）") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = parsed != null && parsed in -DockOffsetConfig.LIMIT_DP..DockOffsetConfig.LIMIT_DP,
+                    onClick = {
+                        updateDock(parsed!!)
+                        editDock = false
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editDock = false }) { Text("取消") }
             }
         )
     }
