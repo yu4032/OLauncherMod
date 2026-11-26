@@ -118,6 +118,151 @@ internal object RootBridge {
     suspend fun saveIndicatorActivity(config: IndicatorActivityConfig): Boolean =
         writeConfig(INDICATOR_FILE, config.serialize())
 
+    suspend fun readIconFix(): IconReplacementConfig? = withContext(Dispatchers.IO) {
+        val uid = execute("id -u")
+        if (!uid.ok || uid.text != "0") return@withContext null
+        val res = execute("""
+            for p in '$DE_DIR/${IconReplacementConfig.RELATIVE_CONF}' '$CE_DIR/${IconReplacementConfig.RELATIVE_CONF}' '$DIR/${IconReplacementConfig.RELATIVE_CONF}' '/data/adb/iconfix.conf'; do
+                if [ -f "${'$'}p" ]; then
+                    cat "${'$'}p"
+                    exit 0
+                fi
+            done
+        """.trimIndent())
+        if (!res.ok) return@withContext null
+        IconReplacementConfig.parse(res.text)
+    }
+
+    suspend fun saveIconFix(config: IconReplacementConfig, restartLauncher: Boolean = true): Boolean =
+        withContext(Dispatchers.IO) {
+            val content = config.serialize()
+            require(!content.contains('\''))
+            val restartCmd = if (restartLauncher) {
+                "rm -f '$DE_BASE/databases/app_icons.db'* 2>/dev/null || true\n" +
+                    "am force-stop com.android.launcher"
+            } else ""
+            execute("""
+                write_conf() {
+                    base="${'$'}1"
+                    dir="${'$'}2/iconfix"
+                    target="${'$'}dir/iconfix.conf"
+                    if [ ! -d "${'$'}base" ]; then return 1; fi
+                    mkdir -p "${'$'}dir" "${'$'}dir/icons" || return 1
+                    tmp=${'$'}(mktemp "${'$'}dir/.iconfix.conf.XXXXXX") || return 1
+                    printf '%s' '$content' > "${'$'}tmp" || { rm -f "${'$'}tmp"; return 1; }
+                    chmod 755 "${'$'}dir" "${'$'}dir/icons" 2>/dev/null || true
+                    chmod 644 "${'$'}tmp" || { rm -f "${'$'}tmp"; return 1; }
+                    owner=${'$'}(stat -c '%u:%g' "${'$'}base" 2>/dev/null || true)
+                    ctx=${'$'}(stat -c '%C' "${'$'}base" 2>/dev/null || true)
+                    if [ -n "${'$'}owner" ]; then chown -R "${'$'}owner" "${'$'}dir" 2>/dev/null || true; fi
+                    if [ -n "${'$'}ctx" ] && [ "${'$'}ctx" != "?" ]; then
+                        chcon -R "${'$'}ctx" "${'$'}dir" 2>/dev/null || restorecon -R "${'$'}dir" 2>/dev/null || true
+                    else
+                        restorecon -R "${'$'}dir" 2>/dev/null || true
+                    fi
+                    mv -f "${'$'}tmp" "${'$'}target" || { rm -f "${'$'}tmp"; return 1; }
+                    return 0
+                }
+                write_ext() {
+                    dir='$DIR/iconfix'
+                    mkdir -p "${'$'}dir" "${'$'}dir/icons" || return 1
+                    tmp=${'$'}(mktemp "${'$'}dir/.iconfix.conf.XXXXXX") || return 1
+                    printf '%s' '$content' > "${'$'}tmp" || { rm -f "${'$'}tmp"; return 1; }
+                    chmod 644 "${'$'}tmp" || { rm -f "${'$'}tmp"; return 1; }
+                    mv -f "${'$'}tmp" "${'$'}dir/iconfix.conf" || { rm -f "${'$'}tmp"; return 1; }
+                    return 0
+                }
+                de_ok=0; ext_ok=0
+                if write_conf '$DE_BASE' '$DE_DIR'; then de_ok=1; fi
+                write_conf '$CE_BASE' '$CE_DIR' >/dev/null 2>&1 || true
+                if write_ext; then ext_ok=1; fi
+                if [ -d '$DE_BASE' ] && [ "${'$'}de_ok" -ne 1 ]; then exit 1; fi
+                if [ "${'$'}de_ok" -ne 1 ] && [ "${'$'}ext_ok" -ne 1 ]; then exit 1; fi
+                $restartCmd
+            """.trimIndent()).ok
+        }
+
+    suspend fun installIconImage(srcPath: String, fileName: String): Boolean =
+        withContext(Dispatchers.IO) {
+            require(fileName.matches(Regex("[A-Za-z0-9._-]+")))
+            require(!srcPath.contains('\''))
+            execute("""
+                copy_one() {
+                    base="${'$'}1"
+                    icons="${'$'}2/${IconReplacementConfig.RELATIVE_ICONS_DIR}"
+                    if [ ! -d "${'$'}base" ]; then return 1; fi
+                    mkdir -p "${'$'}icons" || return 1
+                    cp -f '$srcPath' "${'$'}icons/$fileName" || return 1
+                    chmod 755 "${'$'}2/iconfix" "${'$'}icons" 2>/dev/null || true
+                    chmod 644 "${'$'}icons/$fileName" || return 1
+                    owner=${'$'}(stat -c '%u:%g' "${'$'}base" 2>/dev/null || true)
+                    ctx=${'$'}(stat -c '%C' "${'$'}base" 2>/dev/null || true)
+                    if [ -n "${'$'}owner" ]; then chown "${'$'}owner" "${'$'}icons" "${'$'}icons/$fileName" 2>/dev/null || true; fi
+                    if [ -n "${'$'}ctx" ] && [ "${'$'}ctx" != "?" ]; then
+                        chcon "${'$'}ctx" "${'$'}icons" "${'$'}icons/$fileName" 2>/dev/null || restorecon "${'$'}icons" "${'$'}icons/$fileName" 2>/dev/null || true
+                    else
+                        restorecon "${'$'}icons" "${'$'}icons/$fileName" 2>/dev/null || true
+                    fi
+                    return 0
+                }
+                de_ok=0; ext_ok=0
+                if copy_one '$DE_BASE' '$DE_DIR'; then de_ok=1; fi
+                copy_one '$CE_BASE' '$CE_DIR' >/dev/null 2>&1 || true
+                mkdir -p '$DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}' 2>/dev/null &&
+                    cp -f '$srcPath' '$DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$fileName' &&
+                    chmod 644 '$DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$fileName' && ext_ok=1 || true
+                if [ -d '$DE_BASE' ] && [ "${'$'}de_ok" -ne 1 ]; then exit 1; fi
+                if [ "${'$'}de_ok" -ne 1 ] && [ "${'$'}ext_ok" -ne 1 ]; then exit 1; fi
+            """.trimIndent()).ok
+        }
+
+    suspend fun removeIconImage(fileName: String) {
+        if (!fileName.matches(Regex("[A-Za-z0-9._-]+"))) return
+        withContext(Dispatchers.IO) {
+            execute("""
+                rm -f '$DE_DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$fileName' \
+                      '$CE_DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$fileName' \
+                      '$DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$fileName' 2>/dev/null || true
+            """.trimIndent())
+        }
+    }
+
+    suspend fun clearAllIconFix(): Boolean = withContext(Dispatchers.IO) {
+        execute("""
+            rm -rf '$DE_DIR/iconfix' '$CE_DIR/iconfix' '$DIR/iconfix' 2>/dev/null || true
+            rm -f '$DE_BASE/databases/app_icons.db'* 2>/dev/null || true
+            am force-stop com.android.launcher
+        """.trimIndent()).ok
+    }
+
+    suspend fun refreshLauncherIcons(): Boolean = withContext(Dispatchers.IO) {
+        execute("""
+            rm -f '$DE_BASE/databases/app_icons.db'* 2>/dev/null || true
+            am force-stop com.android.launcher
+        """.trimIndent()).ok
+    }
+
+    suspend fun exportIconPreview(spec: String, dstPath: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (spec.isEmpty() || spec.startsWith("pkg:") || spec.contains("..") || spec.contains('\'')) {
+                return@withContext false
+            }
+            val name = spec.substringAfterLast('/')
+            if (!name.matches(Regex("[A-Za-z0-9._-]+"))) return@withContext false
+            require(!dstPath.contains('\''))
+            execute("""
+                for p in '$DE_DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$name' \
+                         '$CE_DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$name' \
+                         '$DIR/${IconReplacementConfig.RELATIVE_ICONS_DIR}/$name' \
+                         '$spec'; do
+                    if [ -f "${'$'}p" ]; then
+                        cp -f "${'$'}p" '$dstPath' && chmod 644 '$dstPath' && exit 0
+                    fi
+                done
+                exit 1
+            """.trimIndent()).ok
+        }
+
     suspend fun saveGrid(columns: Int, rows: Int, keepEmpty: Boolean): Boolean {
         require(columns in 4..8 && rows in 3..8)
         val content = "$columns $rows ${if (keepEmpty) 1 else 0}"

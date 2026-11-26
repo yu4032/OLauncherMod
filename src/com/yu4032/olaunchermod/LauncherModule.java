@@ -880,6 +880,7 @@ public final class LauncherModule extends XposedModule {
         // The previous global early-return disabled a working workspace grid.
         if (requestedColumns > 0) preflightVisualGridSymbols(loader);
         installIndicatorActivityHook(loader);
+        IconReplacementHooks.install(this, loader, configStore);
 
         try {
             Class<?> idp = Class.forName(

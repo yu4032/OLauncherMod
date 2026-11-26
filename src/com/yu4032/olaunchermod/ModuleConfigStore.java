@@ -73,6 +73,10 @@ final class ModuleConfigStore {
         return searchDirs;
     }
 
+    File primaryDir() {
+        return primaryDir;
+    }
+
     /**
      * Reads the first line of {@code fileName} from the highest-priority
      * available storage tier. If found only in a secondary/legacy tier, mirrors

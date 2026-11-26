@@ -31,7 +31,7 @@ private val CanvasColor = Color(0xFFF5F6F8)
 private val Accent = Color(0xFF2564D8)
 
 @Composable
-private fun ColorOsTheme(content: @Composable () -> Unit) {
+internal fun ColorOsTheme(content: @Composable () -> Unit) {
     val scheme = if (isSystemInDarkTheme()) darkColorScheme(
         primary = Color(0xFF9DBBFF),
         background = Color(0xFF131519),
@@ -60,7 +60,7 @@ private fun ColorOsTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsSurface(title: String, subtitle: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun SettingsSurface(title: String, subtitle: String, content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(22.dp))
@@ -77,7 +77,7 @@ private fun SettingsSurface(title: String, subtitle: String, content: @Composabl
 }
 
 @Composable
-private fun PageFrame(title: String, summary: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun PageFrame(title: String, summary: String, content: @Composable ColumnScope.() -> Unit) {
     Column(
         Modifier.fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
@@ -105,14 +105,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             ColorOsTheme {
-                GridPage { startActivity(Intent(this, MarginSettingsActivity::class.java)) }
+                GridPage(
+                    onOpenMargins = { startActivity(Intent(this, MarginSettingsActivity::class.java)) },
+                    onOpenIconFix = { startActivity(Intent(this, IconSettingsActivity::class.java)) }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun GridPage(onOpenMargins: () -> Unit) {
+private fun GridPage(onOpenMargins: () -> Unit, onOpenIconFix: () -> Unit) {
     var columns by rememberSaveable { mutableStateOf("8") }
     var rows by rememberSaveable { mutableStateOf("4") }
     var keepEmpty by rememberSaveable { mutableStateOf(true) }
@@ -191,6 +194,13 @@ private fun GridPage(onOpenMargins: () -> Unit) {
 
         SettingsSurface("指示器快捷入口", "指定点击「问小布」时打开的活动。") {
             IndicatorActivityControls()
+        }
+
+        SettingsSurface("图标替换", "将桌面应用图标替换为其他应用图标或自定义图片。") {
+            FilledTonalButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onOpenIconFix
+            ) { Text("进入图标替换设置") }
         }
 
         SettingsSurface("运行状态", "模型加载边界与工作区测量报告。") {

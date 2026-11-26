@@ -7,13 +7,18 @@
         android:hasCode="true"
         android:icon="@drawable/icon">
         <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="ColorOS 桌面网格与布局自定义" />
+        <meta-data android:name="xposeddescription" android:value="ColorOS 桌面网格、布局与图标替换自定义" />
         <meta-data android:name="xposedminversion" android:value="93" />
 
         <activity
             android:name=".MarginSettingsActivity"
             android:exported="false"
             android:label="工作区位置" />
+
+        <activity
+            android:name=".IconSettingsActivity"
+            android:exported="false"
+            android:label="图标替换" />
 
         <activity
             android:name=".MainActivity"
